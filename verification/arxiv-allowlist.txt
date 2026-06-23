@@ -1,0 +1,47 @@
+# arxiv-allowlist.txt — Deterministic Sovereign RAG source tarball manifest
+#
+# BINDING contract: arXiv's tarball must contain ONLY these files.
+# No wildcards. No `tar -czvf .`. No `find` recursion. This is the
+# explicit list passed to `tar --files-from=arxiv-allowlist.txt`.
+#
+# Path convention: paths are relative to the repo root.
+#   paper/        — LaTeX source (tex/bib/sty/sections/figures)
+#   verification/ — build script + allowlist + IP-boundary lexicon
+#
+# NOTE: this file diverges from the vault's flat allowlist
+# (paths are relative to repo root; previous layout used bare paths).
+# paper-sync does NOT overwrite this file. Edit by hand.
+#
+# Generated 2026-06-23 per user directive.
+
+# --- Paper source (the only thing arXiv should see) ---
+paper/deterministic-sovereign-rag.tex
+paper/f80-references.bib
+paper/ieee_arxiv.sty
+
+# --- Paper sections (\input{} from main .tex, required for compile) ---
+paper/sections/section-5-clock-drift.tex
+paper/sections/section-7-polyglot-stack.tex
+paper/sections/section-8-det.tex
+paper/sections/section-9-zero-prefill.tex
+paper/sections/section-12-when-not-det.tex
+paper/sections/app-a1-rust-dsvh.tex
+paper/sections/app-a2-go-apg.tex
+paper/sections/app-c-url-index.tex
+
+# --- Verification artifacts (build script + IP-boundary contract) ---
+verification/anonymization-lexicon.md
+verification/f80-build.sh
+verification/arxiv-allowlist.txt
+
+# --- Pre-baked figures (PDF, not TikZ source) ---
+paper/figures/fig_fnv_distribution.pdf
+paper/figures/fig_det_asymmetry.pdf
+paper/figures/fig_zero_prefill_sequence.pdf
+paper/figures/fig_cache_pressure_lambda_k.pdf
+paper/figures/fig_polyglot_stack.pdf
+paper/figures/fig_clock_drift_marzullo.pdf
+paper/figures/fig_economic_roi_matrix.pdf
+paper/figures/fig_corpus_construction.pdf
+paper/figures/fig_weibull_survival.pdf
+paper/figures/fig_prefix_breakage_scenarios.pdf

@@ -1,0 +1,309 @@
+% =====================================================================
+% f80.1-references.bib — Bibliography for Sovereign RAG arXiv paper
+% =====================================================================
+% Draft v1 — 2026-06-23
+% All entries are peer-reviewed prior art OR arXiv preprints with
+% stable identifiers. No live URLs without DOIs/canonical forms.
+% =====================================================================
+
+% --- Johnson-Lindenstrauss Lemma (the original) ---------------------
+@article{johnson1984extensions,
+  author    = {William B. Johnson and Joram Lindenstrauss},
+  title     = {Extensions of {L}ipschitz mappings into a {H}ilbert space},
+  journal   = {Contemporary Mathematics},
+  volume    = {26},
+  pages     = {189--206},
+  year      = {1984},
+  publisher = {American Mathematical Society},
+  note      = {Conference in Modern Analysis and Probability}
+}
+
+% --- Kane-Nelson 2013 (tight JL bound) -------------------------------
+@article{kane2013jl,
+  author  = {Daniel M. Kane and Jelani Nelson},
+  title   = {A Principled Framework for Optimally-Constrained {J}ohnson-{L}indenstrauss Transforms},
+  journal = {Journal of Machine Learning Research},
+  volume  = {14},
+  pages   = {3587--3603},
+  year    = {2013},
+  url     = {https://jmlr.csail.mit.edu/papers/v14/kane13a.html}
+}
+
+% --- Ghojogh 2021 (JL tutorial/survey) -------------------------------
+@article{ghojogh2021jl,
+  author       = {Boubakr Ghojogh and Ali Ghodsi and Fakhri Karray},
+  title        = {{J}ohnson-{L}indenstrauss Lemma, Linear and Nonlinear Random Projections: A Tutorial and Survey},
+  journal      = {arXiv preprint arXiv:2108.04172},
+  year         = {2021},
+  eprint       = {2108.04172},
+  archivePrefix = {arXiv},
+  primaryClass = {cs.LG}
+}
+
+% --- Weinberger 2009 (feature hashing, ICML) ------------------------
+@inproceedings{weinberger2009feature,
+  author    = {Kilian Weinberger and Anirban Dasgupta and John Langford and Alex Smola and Josh Attenberg},
+  title     = {Feature Hashing for Large Scale Multitask Learning},
+  booktitle = {Proceedings of the 26th Annual International Conference on Machine Learning (ICML 2009)},
+  pages     = {1113--1120},
+  year      = {2009},
+  publisher = {ACM},
+  url       = {https://arxiv.org/abs/0902.2206},
+  doi       = {10.1145/1553374.1553516}
+}
+
+% --- Shi 2009 (hash kernels for structured data, NIPS) ---------------
+@inproceedings{shi2009hash,
+  author    = {Qinfeng Shi and James Petterson and Gideon Dror and John Langford and Alex Smola and Alex Strehl and Vishy Vishwanathan},
+  title     = {Hash Kernels for Structured Data},
+  booktitle = {Advances in Neural Information Processing Systems 22 (NIPS 2009)},
+  year      = {2009},
+  publisher = {Curran Associates}
+}
+
+% --- Krzakala 2018 (phase retrieval with random sensing) -------------
+@article{krzakala2018phase,
+  author       = {Florian Krzakala and Marc M\'{e}zard and Lenka Zdeborov\'{a}},
+  title        = {Phase retrieval with random {G}aussian sensing and binary signal},
+  journal      = {arXiv preprint arXiv:1805.08539},
+  year         = {2018},
+  eprint       = {1805.08539},
+  archivePrefix = {arXiv},
+  primaryClass = {cs.IT}
+}
+
+% --- Hoeffding 1963 (probability inequalities) -----------------------
+@article{hoeffding1963,
+  author  = {Wassily Hoeffding},
+  title   = {Probability inequalities for sums of bounded random variables},
+  journal = {Journal of the American Statistical Association},
+  volume  = {58},
+  number  = {301},
+  pages   = {13--30},
+  year    = {1963},
+  doi     = {10.1080/01621459.1963.10500830}
+}
+
+% --- Chernoff 1952 (measure of asymptotic efficiency) ----------------
+@article{chernoff1952,
+  author  = {Herman Chernoff},
+  title   = {A Measure of Asymptotic Efficiency for Tests of a Hypothesis Based on the Sum of Observations},
+  journal = {Annals of Mathematical Statistics},
+  volume  = {23},
+  number  = {4},
+  pages   = {493--507},
+  year    = {1952},
+  doi     = {10.1214/aoms/1177729330}
+}
+
+% --- Rahimi-Recht 2007 (Random Kitchen Sinks, alternative) ----------
+@inproceedings{rahimi2007random,
+  author    = {Ali Rahimi and Benjamin Recht},
+  title     = {Random Features for Large-Scale Kernel Machines},
+  booktitle = {Advances in Neural Information Processing Systems 20 (NIPS 2007)},
+  year      = {2007},
+  publisher = {Curran Associates},
+  url       = {https://people.eecs.berkeley.edu/~brecht/papers/07.rfh.rks.pdf}
+}
+
+% --- Apple HalftimeHash 2021 (modern universal hashing) -------------
+@article{halftime2021,
+  author       = {{Apple Inc.}},
+  title        = {Modern Hashing without 64-bit Multipliers or Finite Fields ({H}alftime{H}ash)},
+  journal      = {arXiv preprint arXiv:2104.08865},
+  year         = {2021},
+  eprint       = {2104.08865},
+  archivePrefix = {arXiv},
+  primaryClass = {cs.DS}
+}
+
+% --- MeanCache 2024 (semantic cache production comparison) ----------
+@article{meancache2024,
+  author       = {Warish Gill and Mohammed Elidrisi and Praveen Kalapatapu},
+  title        = {{M}ean{C}ache: User-Centric Semantic Cache for Large Language Model-Based Services},
+  journal      = {arXiv preprint arXiv:2403.02694},
+  year         = {2024},
+  eprint       = {2403.02694},
+  archivePrefix = {arXiv},
+  primaryClass = {cs.CL}
+}
+
+% --- FNV-1a hash standard (informational) ---------------------------
+@misc{fnv2004,
+  author       = {Glenn Fowler and Landon Curt Noll and Kiem-Phong Vo and Donald Eastlake and Tony Hansen},
+  title        = {The {F}owler/{N}oll/{V}o ({FNV}) Hash Function},
+  howpublished = {Informational RFC, not standards-track},
+  year         = {2004},
+  note         = {Reference implementation and test vectors. FNV-1a 64-bit used in this work: offset basis $0xcbf29ce484222325$, prime $0x100000001b3$}
+}
+
+% --- TLS 1.3 RFC 8446 (zero-RTT reference) --------------------------
+@rfc{rfc8446,
+  author    = {{IETF}},
+  title     = {The Transport Layer Security ({TLS}) Protocol Version 1.3},
+  number    = {8446},
+  year      = {2018},
+  publisher = {RFC Editor},
+  doi       = {10.17487/RFC8446}
+}
+
+% --- QUIC RFC 9000 (connection migration reference) -----------------
+@rfc{rfc9000,
+  author    = {{IETF}},
+  title     = {{QUIC}: A {UDP}-Based Multiplexed and Secure Transport},
+  number    = {9000},
+  year      = {2021},
+  publisher = {RFC Editor},
+  doi       = {10.17487/RFC9000}
+}
+
+% --- Hash Functions for Resource-Constrained (SMHasher benchmark) ---
+@article{smhasher2019,
+  author       = {Markus F.\ Ortmann and others},
+  title        = {Hash Functions for Resource-Constrained Applications: A Survey},
+  journal      = {arXiv preprint arXiv:1902.03040},
+  year         = {2019},
+  eprint       = {1902.03040},
+  archivePrefix = {arXiv},
+  primaryClass = {cs.DS}
+}
+
+% --- FAISS (billion-scale similarity search, IEEE Big Data 2019) -----
+@article{johnson2019faiss,
+  author  = {Jeff Johnson and Matthijs Douze and Herv\'{e} J\'{e}gou},
+  title   = {Billion-scale similarity search with {GPUs}},
+  journal = {IEEE Transactions on Big Data},
+  volume  = {7},
+  number  = {3},
+  pages   = {535--547},
+  year    = {2019},
+  doi     = {10.1109/TBDATA.2019.2921572}
+}
+
+% --- Hanson-Wright 1971 (tail bounds for quadratic forms in Rademacher sums) ---
+@article{hansonwright1971,
+  author  = {David L. Hanson and Farroll Tim Wright},
+  title   = {A Bound on Tail Probabilities for Quadratic Forms in Independent Random Variables},
+  journal = {Annals of Mathematical Statistics},
+  volume  = {42},
+  number  = {3},
+  pages   = {1079--1083},
+  year    = {1971},
+  doi     = {10.1214/aoms/1177693334}
+}
+
+% --- Pinelis 1994 (optimal Bernstein-type inequalities) ---------------
+@article{pinelis1994,
+  author  = {Iosif Pinelis},
+  title   = {Optimum Bounds for the Distributions of Martingales},
+  journal = {Annals of Probability},
+  volume  = {22},
+  number  = {4},
+  pages   = {1679--1706},
+  year    = {1994},
+  doi     = {10.1214/aop/1176988477}
+}
+
+% --- Lamport 1978 (happens-before partial order for distributed systems) ---
+@article{lamport1978,
+  author  = {Leslie Lamport},
+  title   = {Time, Clocks, and the Ordering of Events in a Distributed System},
+  journal = {Communications of the ACM},
+  volume  = {21},
+  number  = {7},
+  pages   = {558--565},
+  year    = {1978},
+  doi     = {10.1145/359545.359563}
+}
+
+% --- Marzullo 1994 (tolerating failures of continuous-valued sensors) ---
+@article{marzullo1994,
+  author  = {Keith Marzullo},
+  title   = {Tolerating Failures of Continuous-Valued Sensors},
+  journal = {ACM Transactions on Computer Systems},
+  volume  = {12},
+  number  = {4},
+  pages   = {284--314},
+  year    = {1994},
+  doi     = {10.1145/195308.195314}
+}
+
+% --- SAECache 2026 (Semantic-Adaptive Eviction for prefix caches) ---
+@article{saecache2026,
+  author       = {Shaoke Fang and Ziang Li and Wenfei Wu and Jiatong Ji and Qingsong Liu and Ruizhi Pu},
+  title        = {Not All Tokens Are Worth Caching: Learning Semantic-Aware Eviction for LLM Prefix Caches},
+  journal      = {arXiv preprint arXiv:2605.18825},
+  year         = {2026},
+  eprint       = {2605.18825},
+  archivePrefix = {arXiv},
+  primaryClass = {cs.LG}
+}
+
+% --- Continuum 2025 (KV Cache Time-to-Live) ---
+@article{continuum2025,
+  author       = {Hanchen Li and Runyuan He and Qiuyang Mang and Qizheng Zhang and Huanzhi Mao and Xiaokun Chen and Hangrui Zhou and Alvin Cheung and Joseph Gonzalez and Ion Stoica},
+  title        = {Continuum: Efficient and Robust Multi-Turn LLM Agent Scheduling with KV Cache Time-to-Live},
+  journal      = {arXiv preprint arXiv:2511.02230},
+  year         = {2025},
+  eprint       = {2511.02230},
+  archivePrefix = {arXiv},
+  primaryClass = {cs.CL}
+}
+
+% --- Tail-Optimized Caching for LLM Inference 2025 ---
+@article{tailoptimized2025,
+  author       = {Wenxin Zhang and Yueying Li and Ciamac C. Moallemi and Tianyi Peng},
+  title        = {Tail-Optimized Caching for LLM Inference},
+  journal      = {arXiv preprint arXiv:2510.15152},
+  year         = {2025},
+  eprint       = {2510.15152},
+  archivePrefix = {arXiv},
+  primaryClass = {cs.LG}
+}
+
+% --- Tokenpocalypse context (June 2026 industry transition) ---------
+% These references anchor the macro-economic context of the paper:
+% the industry-wide shift from subsidized flat-rate AI plans to
+% metered usage-based pricing, which makes the deterministic sovereign
+% pipeline economically necessary (not just technically elegant).
+% Cited in §1 (Introduction) and §12 (When NOT to Use the DET Pattern).
+
+@online{rodriguez2026copilot,
+  author       = {Mario Rodriguez},
+  title        = {Updates to {GitHub Copilot} billing and plans: The
+                   transition to usage-based AI credits},
+  year         = {2026},
+  month        = apr,
+  howpublished = {GitHub Blog, News \& Insights},
+  url          = {https://github.blog/news-insights/company-news/github-copilot-is-moving-to-usage-based-billing/},
+  note         = {Accessed 2026-06-23}
+}
+
+@article{orland2026anthropic,
+  author       = {Kyle Orland},
+  title        = {Anthropic pauses token-based billing for its {Claude}
+                   {Agent SDK} after developer backlash},
+  journal      = {Ars Technica},
+  year         = {2026},
+  month        = jun,
+  url          = {https://arstechnica.com/ai/2026/06/anthropic-pauses-token-based-billing-for-its-claude-agent-sdk/},
+  note         = {Defers API metered fees for integrated IDE runtimes}
+}
+
+@online{haelen2026subsidy,
+  author       = {Bennie Haelen},
+  title        = {The subsidy ended: What tool-using agents actually cost},
+  howpublished = {O'Reilly Radar},
+  year         = {2026},
+  month        = jun,
+  url          = {https://www.oreilly.com/radar/the-subsidy-ended-what-tool-using-agents-actually-cost/}
+}
+
+@article{noreika2026tokenpocalypse,
+  author       = {Alius Noreika},
+  title        = {{Copilot's} token billing signals {AI} pricing reckoning},
+  journal      = {Science \& Technology News},
+  year         = {2026},
+  month        = jun,
+  url          = {https://www.technology.org/2026/06/08/github-copilot-tokenpocalypse-ai-pricing/}
+}

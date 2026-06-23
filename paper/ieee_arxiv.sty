@@ -1,0 +1,35 @@
+% ieee_arxiv.sty — minimal stub for F80 arXiv submission.
+%
+% This is a placeholder that allows the F80 paper to compile during
+% local validation. The full IEEEtran-style preamble will be substituted
+% at arXiv submission time using the ieeetran-arxiv.template file.
+%
+% For now, the stub provides the standard preamble packages used in
+% the paper: amsmath, graphicx, algorithm, hyperref, etc.
+
+\NeedsTeXFormat{LaTeX2e}
+\ProvidesPackage{ieee_arxiv}[2026/06/23 F80 arXiv stub]
+
+% Core math + theorem
+\RequirePackage{amsmath,amssymb,amsthm,amsfonts}
+\RequirePackage{booktabs}
+\RequirePackage{graphicx}
+\RequirePackage{algorithm}
+\RequirePackage{algpseudocode}
+\RequirePackage{hyperref}
+\RequirePackage{url}
+\RequirePackage{microtype}
+
+% Theorem environments
+\@ifundefined{theorem}{\newtheorem{theorem}{Theorem}}{}
+\@ifundefined{lemma}{}{\newtheorem{lemma}[theorem]{Lemma}}
+\@ifundefined{corollary}{}{\newtheorem{corollary}[theorem]{Corollary}}
+\@ifundefined{definition}{}{\theoremstyle{definition}\newtheorem{definition}{Definition}}
+\@ifundefined{operationalbound}{}{\newtheorem{operationalbound}[theorem]{Operational Bound}}
+\@ifundefined{remark}{}{\theoremstyle{remark}\newtheorem{remark}{Remark}}
+
+% IEEE-style two-column defaults
+\setlength{\parskip}{0.5em}
+\setlength{\parindent}{0pt}
+
+\endinput

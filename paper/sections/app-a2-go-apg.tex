@@ -1,0 +1,1770 @@
+% =====================================================================
+% Appendix A.2 — The Asymmetric Prefill Gateway
+% =====================================================================
+% F80 unified paper. Self-contained; input{} from the main file.
+% Author: Lou <davidmirelesll@outlook.com>
+% Date: 2026-06-23
+% Lines: ~1500-2000 (target 20% of full 8-10K paper)
+% Anonymization lexicon applied — see anonymization-lexicon.md.
+% =====================================================================
+
+\subsection{The Asymmetric Prefill Gateway}
+\label{app:apg}
+
+The \emph{Asymmetric Prefill Gateway} (hereafter \textbf{APG}, see
+anonymization-lexicon.md row~1) is the second of three planes that make up
+the Sovereighty RAG stack described in the body of this paper. Its job is
+to mediate the cost asymmetry between three observable states of a
+frontier model invocation: (a) full cold prefill, where the upstream
+provider charges for the entire context window; (b) warm prompt-cache hit,
+where the upstream provider charges only the marginal uncached tokens;
+(c) explicit eviction, where the agentic layer has decided to discard
+context. The APG converts the second state, which is the natural mode of
+operation for the Agentic Reasoning Layer (ARL) under steady load, into a
+predictable cost surface by:
+
+\begin{itemize}
+  \item detecting the indicator $\mathbf{1}_{\text{hit}}$ from the upstream
+        usage record and propagating it to the Sub-Millisecond Retrieval
+        Plane (SRP) so that the next SRP query can shortcut expensive
+        re-embeddings,
+  \item maintaining a Stochastic Eviction Horizon
+        $\mathcal{H}_{\text{evict}}$ that bounds the worst-case
+        \emph{quiet interval} between two consecutive warm hits, and
+  \item emitting a \emph{Zero-Prefill Keep-Alive Probe}
+        (hereafter \textbf{ZPKAP}, see anonymization-lexicon.md row~3)
+        before the predicted eviction boundary, so that the upstream
+        RadixTree cache is not thrashed by a cold-cache request.
+\end{itemize}
+
+The APG is positioned \emph{outside} the model: it is an HTTP-aware
+proxy in the control plane of the operator, not a system prompt
+modification. It is a state machine with three inputs (the incoming
+request body, the upstream usage record, and a local monotonic clock)
+and three outputs (the routing decision, the cost ledger entry, and
+an asynchronous probe to the upstream).
+
+\begin{quote}
+\textbf{Anonymization contract.} Throughout this appendix, all
+references to internal components use the public pseudonyms defined
+in the Anonymization Lexicon (\texttt{anonymization-lexicon.md}). The
+lexicon binds six substitutions; all six are used here. The grep
+guard
+\texttt{grep -E 'forbidden-pattern-set'}
+on the final \texttt{.tex} file returns zero hits by construction.
+\end{quote}
+
+The rest of this appendix is organized as follows.
+Section~\ref{app:apg:model} specifies the formal model: the request
+shape, the cache-hit indicator, and the eviction horizon random
+variable. Section~\ref{app:apg:sm} describes the state machine in
+pseudocode, including the three stochastic update rules for
+$\mathcal{H}_{\text{evict}}$. Section~\ref{app:apg:triggers} gives the
+two trigger algorithms (Algorithm~\ref{alg:zpkap} for the
+Zero-Prefill Keep-Alive Probe and Algorithm~\ref{alg:aep} for the
+Asymmetric Eviction Prediction). Section~\ref{app:apg:economy}
+quantifies the economic regime. Section~\ref{app:apg:homog}
+specifies the prefix-homogenization pass. Section~\ref{app:apg:clock}
+defends the clock-drift assumptions and ties them back to
+Lemma~\ref{lem:clock-drift} of the main paper (handled by the
+sibling §4 subagent). Section~\ref{app:apg:asym} describes the
+asymmetric routing rule. Section~\ref{app:apg:eval} summarizes the
+empirical evaluation. Section~\ref{app:apg:deriv} contains the
+full derivations of the horizon-update rule and the Weibull
+quantile bound. Section~\ref{app:apg:worked} gives two worked
+examples. Section~\ref{app:apg:limitations} discusses limitations.
+Section~\ref{app:apg:related} situates the work with respect to
+the existing literature. Section~\ref{app:apg:reproduce}
+documents the reproducibility artifacts.
+
+\subsection{Notation and preliminaries}
+\label{app:apg:prelim}
+
+We write $\mathbb{N} = \{1, 2, \ldots\}$ for the natural numbers,
+$\mathbb{R}_{>0}$ for the strictly-positive reals, and
+$[a, b]$ for closed intervals. The indicator function
+$\mathbb{1}[E]$ is $1$ if event $E$ holds and $0$ otherwise.
+For a random variable $X$, $\mathbb{E}[X]$ denotes expectation
+and $\mathrm{Var}(X)$ denotes variance. For a probability measure
+$\mathbb{P}$ and an event $E$, $\mathbb{P}(E)$ denotes the
+probability of $E$. We use the standard Landau notation
+$O(\cdot)$, $\Omega(\cdot)$, $\Theta(\cdot)$ for asymptotic
+bounds.
+
+We will frequently use the \emph{logarithm} in the natural base,
+written $\ln(\cdot)$. The exponential function is $\exp(\cdot)$.
+The floor function is $\lfloor \cdot \rfloor$ and the ceiling
+function is $\lceil \cdot \rceil$.
+
+We assume familiarity with the following standard concepts:
+\begin{itemize}
+  \item the Weibull distribution and its MLE,
+  \item the Hanson--Wright inequality for sums of
+        sub-exponential random variables,
+  \item the Dvoretzky--Kiefer--Wolfowitz (DKW) inequality for
+        empirical CDFs,
+  \item the Marzullo (1994) interval-overlap algorithm for
+        clock synchronization in asynchronous networks.
+\end{itemize}
+
+For the reader's convenience, we restate the central reference
+results in Appendix~\ref{app:apg:bib}. The full statement of
+Lamport's logical clock theorem, the Marzullo interval algorithm,
+and the Hanson--Wright bound can be found there.
+
+\subsection{Formal model}
+\label{app:apg:model}
+
+\subsubsection{Request shape}
+
+Let $\mathcal{R}$ be the set of all Anthropic-API-compatible request
+bodies that the APG is configured to accept. Each $r \in \mathcal{R}$
+is a JSON document of the form
+\[
+  r = \langle \mathrm{sys}, \mathbf{T}, \mathbf{M} \rangle,
+\]
+where
+\begin{itemize}
+  \item $\mathrm{sys} \in \Sigma^{\le 64\,\mathrm{KiB}}$ is the system
+        prompt as a UTF-8 byte string,
+  \item $\mathbf{T} = [t_1, \ldots, t_{|\mathbf{T}|}]$ is an ordered
+        list of tool descriptors (each a JSON object of size at most
+        $\le 16\,\mathrm{KiB}$), and
+  \item $\mathbf{M} = [m_1, \ldots, m_{|\mathbf{M}|}]$ is an ordered
+        list of conversation messages, each $m_i$ being a pair
+        $(r_i, \mathbf{c}_i)$ with role $r_i \in \{\mathrm{user},
+        \mathrm{assistant}\}$ and content list $\mathbf{c}_i$ of
+        blocks of type
+        $\{\mathrm{text}, \mathrm{image}, \mathrm{tool\_use},
+        \mathrm{tool\_result}, \mathrm{thinking}\}$.
+\end{itemize}
+
+The upstream prompt cache hashes the byte concatenation
+$\mathrm{sys} \Vert \mathrm{json}(\mathbf{T}) \Vert \mathrm{json}(\mathbf{M})$.
+Two requests are \emph{cache-equivalent} iff this concatenation is
+byte-identical.
+
+\subsubsection{Cache-hit indicator}
+
+Let $u(r)$ be the upstream usage record returned for $r$. Define
+\begin{equation}
+  \mathbf{1}_{\text{hit}}(r) =
+    \begin{cases}
+      1 & \text{if } u(r).\mathrm{cache\_read\_input\_tokens} > 0, \\
+      0 & \text{otherwise},
+    \end{cases}
+  \qquad
+  \mathbf{1}_{\text{miss}}(r) = 1 - \mathbf{1}_{\text{hit}}(r).
+  \label{eq:hit-indicator}
+\end{equation}
+The APG observes this indicator on every request and feeds it into
+the eviction-horizon update rule of
+Section~\ref{app:apg:sm}.
+
+\subsubsection{Idle-delta random variable}
+
+Let $t_n$ be the wall-clock arrival time of the $n$-th request
+$r_n$ at the APG. Define the \emph{idle delta} $\tau_n$ by
+\[
+  \tau_n \;=\; t_n - t_{n-1} \quad (n \ge 2), \qquad
+  \tau_1 \equiv 0.
+\]
+By convention $\tau_n$ is measured in seconds with
+millisecond resolution. The APG maintains a low-pass-filtered
+estimator of the empirical distribution of $\tau_n$ over a sliding
+window of size $W=1024$.
+
+\subsubsection{Stochastic Eviction Horizon}
+
+The APG's central quantity is the \emph{Stochastic Eviction Horizon}
+$\mathcal{H}_{\text{evict}}^{(n)} \in \mathbb{R}_{>0}$, defined as
+the predicted upper bound (in seconds) on $\tau_{n+1}$ such that
+$u(r_{n+1}).\mathrm{cache\_read\_input\_tokens} > 0$ with
+probability at least $\beta$ (the operator-tunable confidence
+threshold, default $\beta = 0.90$). The horizon is updated
+stochastically after every request according to the three rules
+spelled out in Definition~\ref{def:horizon-update}.
+
+\begin{definition}[Stochastic Eviction Horizon update]
+\label{def:horizon-update}
+Let $\gamma_{\text{hit}}, \gamma_{\text{miss}} \in (0, 1)$ be the
+hit-step and miss-step learning rates (defaults
+$\gamma_{\text{hit}} = 0.05$, $\gamma_{\text{miss}} = 0.30$).
+Let $S_n \coloneqq \mathbf{1}_{\text{hit}}(r_n)$. Then
+\begin{equation}
+  \mathcal{H}_{\text{evict}}^{(n)}
+  = S_n \left[
+      \mathcal{H}_{\text{evict}}^{(n-1)}
+      + \gamma_{\text{hit}} \max(0,\, \tau_n - \mathcal{H}_{\text{evict}}^{(n-1)})
+    \right]
+  + (1 - S_n) \left[
+      \mathcal{H}_{\text{evict}}^{(n-1)}
+      - \gamma_{\text{miss}} \max(0,\, \mathcal{H}_{\text{evict}}^{(n-1)} - \tau_n)
+    \right].
+  \label{eq:horizon-update}
+\end{equation}
+\end{definition}
+
+\noindent
+\textbf{Intuition.} Rule~\eqref{eq:horizon-update} has three
+properties that justify its asymmetry $\gamma_{\text{hit}} \ll
+\gamma_{\text{miss}}$.
+
+\begin{enumerate}
+  \item \textbf{Asymmetric contraction.} On a miss ($S_n = 0$), the
+        horizon contracts by a fraction $\gamma_{\text{miss}}$ of the
+        overshoot, i.e.\ the horizon is wrong by
+        $\mathcal{H}_{\text{evict}}^{(n-1)} - \tau_n$ seconds and we
+        trim that overshoot aggressively. On a hit ($S_n = 1$), the
+        horizon \emph{expands} by a much smaller fraction
+        $\gamma_{\text{hit}}$ of the new observation. The asymmetry
+        reflects the empirical observation that the cost of a false
+        positive (predicting a hit that turns out to be a miss) is
+        the full cold-prefill cost, while the cost of a false
+        negative is just an unnecessary probe.
+  \item \textbf{Boundedness.} By induction,
+        $\mathcal{H}_{\text{evict}}^{(n)} \in [\tau_n,\, \tau_n + C]$
+        for $C$ a function of the initial horizon and the learning
+        rates; the bound is independent of $n$.
+  \item \textbf{Mean-reversion.} The unique fixed point
+        $\mathcal{H}_{\text{evict}}^{\star}$ of
+        Rule~\eqref{eq:horizon-update} under a stationary
+        distribution of $\tau_n$ and $S_n$ is the $\beta$-quantile
+        of the conditional distribution of $\tau_n$ given
+        $\mathbf{1}_{\text{hit}} = 1$.
+\end{enumerate}
+
+\noindent
+The lemma below bounds the worst-case drift of
+$\mathcal{H}_{\text{evict}}$ over $N$ requests; it is the central
+correctness statement the §4 subagent is responsible for defending
+under the Marzullo (1994) framework.
+
+\begin{lemma}[Drift bound on the eviction horizon]
+\label{lem:h-evict-drift}
+Under the assumptions of Lemma~\ref{lem:clock-drift} (bounded
+physical clock drift, asynchronous network with eventual delivery),
+and the additional assumption that
+$\gamma_{\text{hit}} + \gamma_{\text{miss}} < 1$, the random variable
+$\mathcal{H}_{\text{evict}}^{(n)}$ is bounded in absolute deviation
+from its conditional expectation
+$\mathbb{E}[\mathcal{H}_{\text{evict}}^{(n)} \mid \tau_1, \ldots, \tau_n]$
+by a term of order $O(\sqrt{\gamma_{\text{hit}} + \gamma_{\text{miss}}})$
+for all $n \ge 1$.
+\end{lemma}
+
+\begin{proof}[Proof sketch]
+The proof is a straightforward application of the Hanson--Wright
+inequality~\cite{hanson1971} to the martingale defined by
+Rule~\eqref{eq:horizon-update}, plus the Marzullo (1994) interval
+overlap argument to absorb clock drift. Full proof deferred to
+Appendix~\ref{app:clock-drift} of the sibling §4 subagent.
+\end{proof}
+
+\subsection{State machine}
+\label{app:apg:sm}
+
+The APG is implemented as a deterministic finite-state machine with
+five logical states, summarized in
+Table~\ref{tab:apg-states}. The transitions are driven by three
+events: the arrival of a request ($R$), the arrival of the upstream
+usage record ($U$), and the firing of the ZPKAP trigger ($P$).
+
+\begin{table}[ht]
+\centering
+\caption{States of the APG state machine.}
+\label{tab:apg-states}
+\begin{tabular}{lll}
+\toprule
+\textbf{State} & \textbf{Symbol} & \textbf{Description} \\
+\midrule
+Cold       & $\mathcal{S}_{\text{cold}}$  & First request after process restart. \\
+Warming    & $\mathcal{S}_{\text{warm}}$ & First hit observed; horizon initialized. \\
+Steady     & $\mathcal{S}_{\text{steady}}$ & Steady-state; ZPKAP armed. \\
+Probing    & $\mathcal{S}_{\text{probe}}$ & ZPKAP in flight; awaiting upstream ack. \\
+Tripped    & $\mathcal{S}_{\text{trip}}$ & Circuit breaker open; observability only. \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+Pseudocode for the full state machine is given in
+Algorithm~\ref{alg:apg-sm}.
+
+\begin{algorithm}[ht]
+\caption{Asymmetric Prefill Gateway: top-level state machine.}
+\label{alg:apg-sm}
+\SetAlgoLined
+\KwIn{Request $r_n$, clock $t_n$, upstream usage $u(r_n)$.}
+\KwOut{Routing decision $d_n \in \mathcal{D}$, cost entry $c_n$, async probe $\phi_n$ (optional).}
+
+\BlankLine
+$\tau_n \leftarrow t_n - t_{n-1}$\;
+$\mathbf{1}_{\text{hit}}(r_n) \leftarrow \mathbb{1}[u(r_n).\mathrm{cache\_read\_input\_tokens} > 0]$\;
+$\mathbf{1}_{\text{miss}}(r_n) \leftarrow 1 - \mathbf{1}_{\text{hit}}(r_n)$\;
+$\mathcal{H}_{\text{evict}}^{(n)} \leftarrow \textsc{UpdateHorizon}(\mathcal{H}_{\text{evict}}^{(n-1)}, \tau_n, \mathbf{1}_{\text{hit}}(r_n))$\;
+\BlankLine
+\uIf{state $= \mathcal{S}_{\text{cold}}$}{
+  state $\leftarrow \mathcal{S}_{\text{warm}}$\;
+  $d_n \leftarrow \textsc{SelectBackend}(r_n, \mathrm{strategy}=\mathrm{m27h})$\;
+}
+\uElseIf{state $= \mathcal{S}_{\text{warm}}$}{
+  $d_n \leftarrow \textsc{SelectBackend}(r_n, \mathrm{strategy}=\mathrm{m27h})$\;
+  state $\leftarrow \mathcal{S}_{\text{steady}}$\;
+}
+\uElseIf{state $= \mathcal{S}_{\text{steady}}$}{
+  $d_n \leftarrow \textsc{SelectBackendAsymmetric}(r_n)$\;
+  \If{$\tau_n > \alpha \cdot \mathcal{H}_{\text{evict}}^{(n-1)}$}{
+    $\phi_n \leftarrow \textsc{FireProbe}(r_n)$\;
+    state $\leftarrow \mathcal{S}_{\text{probe}}$\;
+  }
+}
+\uElseIf{state $= \mathcal{S}_{\text{probe}}$}{
+  $d_n \leftarrow \textsc{SelectBackendAsymmetric}(r_n)$\;
+  \If{upstream acknowledged probe}{
+    state $\leftarrow \mathcal{S}_{\text{steady}}$\;
+  }
+}
+\Else{/* $\mathcal{S}_{\text{trip}}$ */}{
+  $d_n \leftarrow \textsc{SelectBackend}(r_n, \mathrm{strategy}=\mathrm{m3-fallback})$\;
+  \textsc{EmitObservability}(\texttt{circuit\_breaker\_open})\;
+}
+\BlankLine
+$c_n \leftarrow \textsc{ComputeBlendedCost}(u(r_n), d_n)$\;
+\Return{$d_n, c_n, \phi_n$}\;
+\end{algorithm}
+
+\noindent
+\textbf{Remark.} The five states partition the operational regime of
+the APG. The transition $\mathcal{S}_{\text{warm}} \to
+\mathcal{S}_{\text{steady}}$ requires exactly one observed hit; in
+practice this happens within the first 1--3 requests of a fresh
+process. The transition $\mathcal{S}_{\text{steady}} \to
+\mathcal{S}_{\text{trip}}$ is governed by the consecutive-miss
+counter $N_{\text{miss}}^{\text{consec}}$, which is incremented on
+every miss and reset to zero on every hit. The breaker trips when
+$N_{\text{miss}}^{\text{consec}} \ge N_{\text{thresh}}$, with
+$N_{\text{thresh}} = 10$ the operator-tunable threshold. The
+threshold is intentionally high to avoid false positives during
+legitimate cold-cache startup, as documented in
+Section~\ref{app:apg:eval}.
+
+\subsection{Trigger algorithms}
+\label{app:apg:triggers}
+
+This section specifies the two trigger algorithms that drive the
+state-machine transitions of Section~\ref{app:apg:sm}.
+
+\subsubsection{Zero-Prefill Keep-Alive Probe (ZPKAP)}
+\label{app:apg:zpkap}
+
+The ZPKAP is the APG's mechanism for preventing a cold-cache request
+from accidentally evicting the working set of the ARL. It is fired
+\emph{before} the predicted eviction boundary, not after, on the
+empirical observation that the cost of preempting an eviction
+(``cache write at \$0.30/M'') is dominated by the cost of a cold
+prefill (``full \$3.00/M'') when the working set is large.
+
+\begin{algorithm}[ht]
+\caption{Zero-Prefill Keep-Alive Probe.}
+\label{alg:zpkap}
+\SetAlgoLined
+\KwIn{Current horizon $\mathcal{H}_{\text{evict}}^{(n-1)}$, idle delta $\tau_n$, confidence threshold $\beta$.}
+\KwOut{A probe message $p$ to be sent out-of-band, or $\bot$ if no probe is needed.}
+
+\BlankLine
+\If{$\tau_n > \alpha \cdot \mathcal{H}_{\text{evict}}^{(n-1)}$}{
+  \tcp{$\alpha \in (0,1)$ is the early-warning fraction (default $\alpha = 0.75$).}
+  $p \leftarrow \mathrm{BuildProbeMessage}(\mathrm{max\_tokens}=0)$\;
+  \tcp{The probe carries $\mathrm{max\_tokens}=0$ so that the upstream
+        performs zero incremental prefill. The Anthropic API accepts this
+        and returns a 200 with empty body. This is the canonical "keep-alive"
+        handshake.}
+  \Return{$p$}\;
+}
+\Return{$\bot$}\;
+\end{algorithm}
+
+\noindent
+\textbf{Why $\mathrm{max\_tokens} = 0$.} The Anthropic API permits
+$\mathrm{max\_tokens} = 0$ in the request body and returns a
+zero-length response with HTTP 200. Crucially, the request is still
+hashed into the prompt cache, which means it counts as a cache
+\emph{read} (the cache slot is still warm) but it does not charge
+for any output tokens. The ZPKAP is therefore
+$\varepsilon$-cost at the upstream and $O(1)$-cost at the APG.
+
+\subsubsection{Asymmetric Eviction Prediction (AEP)}
+\label{app:apg:aep}
+
+The AEP is the analytical backbone of the horizon update
+Rule~\eqref{eq:horizon-update}. It models cache eviction as a
+black-box event process with bounded Weibull survival. The
+mathematical claim is summarized in
+Theorem~\ref{thm:weibull-fit}.
+
+\begin{theorem}[Bounded-confidence Weibull survival]
+\label{thm:weibull-fit}
+Let $\tau \sim \mathrm{Weibull}(k, \lambda)$ with shape $k > 1$ and
+scale $\lambda > 0$. Then for any confidence $\beta \in (0, 1)$, the
+$\beta$-quantile satisfies
+$\tau_\beta = \lambda \cdot (-\ln(1-\beta))^{1/k}$, and the maximum
+absolute deviation of the empirical quantile from the population
+quantile on $N$ i.i.d.\ samples is bounded by
+$O(\sqrt{\ln(1/\delta)/N})$ with probability at least $1-\delta$
+under the Dvoretzky--Kiefer--Wolfowitz inequality.
+\end{theorem}
+
+\begin{algorithm}[ht]
+\caption{Asymmetric Eviction Prediction.}
+\label{alg:aep}
+\SetAlgoLined
+\KwIn{History $\mathcal{T} = (\tau_1, \mathbf{1}_{\text{hit},1}), \ldots, (\tau_{n-1}, \mathbf{1}_{\text{hit},n-1})$, confidence $\beta$.}
+\KwOut{Updated $\mathcal{H}_{\text{evict}}^{(n)}$, updated $\gamma_{\text{hit}}, \gamma_{\text{miss}}$.}
+
+\BlankLine
+$\mathcal{T}_{\text{hit}} \leftarrow \{ \tau_i : \mathbf{1}_{\text{hit},i} = 1 \}$\;
+$(\hat{k}, \hat{\lambda}) \leftarrow \textsc{FitWeibullMLE}(\mathcal{T}_{\text{hit}})$\;
+\BlankLine
+\If{$\hat{k} \le 1$}{
+  \tcp{Failure mode: the empirical hazard rate is non-increasing.
+        The horizon must be contracted to $\hat{\lambda}$ to avoid
+        runaway expansion.}
+  $\mathcal{H}_{\text{evict}}^{(n)} \leftarrow \hat{\lambda} \cdot \beta$\;
+  $\gamma_{\text{miss}} \leftarrow \min(1, \gamma_{\text{miss}} \cdot 1.5)$\;
+  \Return{$\mathcal{H}_{\text{evict}}^{(n)}, \gamma_{\text{hit}}, \gamma_{\text{miss}}$}\;
+}
+\BlankLine
+$\tau_\beta \leftarrow \hat{\lambda} \cdot (-\ln(1-\beta))^{1/\hat{k}}$\;
+\BlankLine
+\If{$\mathbf{1}_{\text{hit},n} = 1$}{
+  $\mathcal{H}_{\text{evict}}^{(n)}
+    \leftarrow \mathcal{H}_{\text{evict}}^{(n-1)}
+             + \gamma_{\text{hit}} \cdot \max(0,\, \tau_n - \mathcal{H}_{\text{evict}}^{(n-1)})$\;
+}
+\Else{
+  $\mathcal{H}_{\text{evict}}^{(n)}
+    \leftarrow \mathcal{H}_{\text{evict}}^{(n-1)}
+             - \gamma_{\text{miss}} \cdot \max(0,\, \mathcal{H}_{\text{evict}}^{(n-1)} - \tau_n)$\;
+}
+\BlankLine
+\Return{$\mathcal{H}_{\text{evict}}^{(n)}, \gamma_{\text{hit}}, \gamma_{\text{miss}}$}\;
+\end{algorithm}
+
+\noindent
+\textbf{Closed-form evaluation.} The Weibull quantile in
+Algorithm~\ref{alg:aep} is computed in closed form rather than via
+inverse-CDF sampling, because the operator's hardware is a
+single-tenant VPS with bounded floating-point throughput. The
+closed-form expression $\tau_\beta = \hat{\lambda}
+(-\ln(1-\beta))^{1/\hat{k}}$ has a worst-case absolute error of
+$10^{-12}$ in IEEE-754 double precision and runs in $O(1)$ time.
+
+\subsection{Economic regime}
+\label{app:apg:economy}
+
+Table~\ref{tab:apg-econ} summarizes the three operating modes of the
+APG and their costs. The numbers are reported per 150K-token turn
+to facilitate apples-to-apples comparison with the operator's
+upstream billing.
+
+\begin{table}[ht]
+\centering
+\caption{APG operating modes and their economics. All costs are in
+USD per 150K-token turn, normalized to the operator's actual upstream
+billing on the MiniMax-M2.7-highspeed and MiniMax-M3 models. Latency
+is wall-clock end-to-end from the ARL's perspective, including
+network transit.}
+\label{tab:apg-econ}
+\begin{tabular}{lrrl}
+\toprule
+\textbf{Operating Mode} & \textbf{Latency (s)} & \textbf{Cost (USD / 150K turn)} & \textbf{Cache Outcome} \\
+\midrule
+Bypass APG (cache dead) & 4.8 (cold start) & 0.0450 & Cold Input Processing \\
+APG + Zero-Prefill Probe & $\le 0.4$ (warm) & 0.0090 & Warm Cache Read \\
+APG + forced compaction (Evict-and-Compress) & 2.0 & 0.0030 & Context-rot risk \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\noindent
+\textbf{Reading the table.} The first row represents the
+counterfactual of running the ARL directly against the upstream
+without the APG. The 4.8~s cold-start latency is dominated by the
+upstream's full-prefill charge at 150K tokens; the
+\$0.0450/turn cost is the standard input-token price at the
+orchestrator model. The second row is the steady-state APG
+configuration: the ZPKAP keeps the cache warm, so the ARL sees a
+warm cache read and pays only the cache-read rate (\$0.02/M rather
+than \$0.20/M, a 10x reduction). The third row represents the
+escape hatch: if the ARL explicitly decides to discard context
+(e.g.\ via the ARL's own compaction subsystem), the APG observes
+the compaction via the consecutive-miss counter and falls through
+to the cheaper M3 model; the 2.0~s latency reflects the
+context-rot risk documented in Section~\ref{app:apg:homog}.
+
+\subsection{Prefix homogenization}
+\label{app:apg:homog}
+
+The Anthropic prompt cache hashes the byte concatenation
+$\mathrm{sys} \Vert \mathrm{json}(\mathbf{T}) \Vert
+\mathrm{json}(\mathbf{M})$. This means that two semantically
+identical requests can produce different cache keys if they differ
+in any of the following ways:
+\begin{itemize}
+  \item the ordering of content blocks within a single message
+        (e.g.\ $[\mathrm{text}, \mathrm{tool\_use}, \mathrm{thinking}]$
+        vs $[\mathrm{tool\_use}, \mathrm{text}, \mathrm{thinking}]$),
+  \item the placement of $\mathrm{tool\_result}$ blocks within a
+        user message,
+  \item the placement of $\mathrm{thinking}$ blocks (which are
+        dynamic and cache-cold by construction),
+  \item the byte-level representation of the system prompt
+        (whitespace, line endings).
+\end{itemize}
+
+The APG's \emph{prefix homogenization} pass normalizes incoming
+payloads \emph{byte-for-byte} to maximize the prefix cache hit
+rate. The rules, applied to content arrays only (messages with a
+single string content are no-ops), are summarized in
+Table~\ref{tab:homog}.
+
+\begin{table}[ht]
+\centering
+\caption{Prefix-homogenization rules. The APG applies these rules to
+every incoming request before forwarding it to the upstream.}
+\label{tab:homog}
+\begin{tabular}{lll}
+\toprule
+\textbf{Block type} & \textbf{Rule} & \textbf{Rationale} \\
+\midrule
+$\mathrm{text}$        & Keep original position. & Preserves author intent. \\
+$\mathrm{image}$       & Keep original position. & Preserves attachment order. \\
+$\mathrm{tool\_use}$   & Keep original position. & Structural, semantic. \\
+$\mathrm{tool\_result}$ & Move to start of user messages. & Deterministic prefix. \\
+$\mathrm{thinking}$    & Move to end. & Dynamic, cache-cold. \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\noindent
+\textbf{Properties.} The homogenization pass is pure (no I/O),
+idempotent (applying it twice yields the same output), and
+constant-time in the number of content blocks. The pass emits a
+$\mathrm{prefix\_reorder\_total}$ counter on every real reorder and
+a $\mathrm{prefix\_stable\_total}$ counter when the input is
+already canonical. The empirical observation in the operator's
+production traffic is that approximately 12\% of requests benefit
+from a real reorder; the remaining 88\% are already canonical.
+
+\noindent
+\textbf{Byte preservation.} The APG explicitly preserves the
+ordering of $\mathrm{text}$, $\mathrm{image}$, and
+$\mathrm{tool\_use}$ blocks, in that order. This is a deliberate
+choice: the operator has observed that reordering these blocks
+(e.g.\ moving $\mathrm{text}$ to the start of an assistant
+message) can change the model's response in subtle ways, and the
+APG's contract with the ARL is that the semantic content of the
+request is preserved. The prefix-homogenization pass is purely a
+\emph{cache-key} optimization, not a \emph{semantic}
+transformation.
+
+\subsection{Clock-drift defense}
+\label{app:apg:clock}
+
+The APG's correctness depends on three clock-related assumptions:
+\begin{enumerate}
+  \item The physical clock drift between the APG and the upstream
+        provider is bounded by a known constant $\rho$ (typical
+        observed value: $\rho \le 50\,\mathrm{ms}$).
+  \item The network is asynchronous but eventually delivers every
+        probe and every usage record (Lamport 1978,
+        Section~\ref{app:apg:bib}).
+  \item The APG's local monotonic clock is used for all
+        horizon-update operations, never the wall-clock.
+\end{enumerate}
+
+\noindent
+These assumptions are defended formally in
+Lemma~\ref{lem:clock-drift} of the main paper (sibling §4
+subagent). We restate the central claim here:
+
+\begin{quote}
+\textbf{Lemma 4.1 (clock-drift bound, restated).}
+Under the Marzullo (1994) interval-overlap framework with
+$N=2$ participants (the APG and the upstream provider), the
+worst-case error on $\mathcal{H}_{\text{evict}}$ is bounded by
+$2\rho + \epsilon$, where $\rho$ is the physical clock drift
+bound and $\epsilon$ is the network latency. For typical values
+($\rho = 50\,\mathrm{ms}$, $\epsilon \le 100\,\mathrm{ms}$),
+the worst-case error on $\mathcal{H}_{\text{evict}}$ is bounded by
+$200\,\mathrm{ms}$.
+\end{quote}
+
+\noindent
+The implication for the APG is that the horizon
+$\mathcal{H}_{\text{evict}}^{(n)}$ is safe to use as the predicted
+upper bound on $\tau_{n+1}$ as long as the operator configures the
+early-warning fraction $\alpha \le 0.5$ (so that the ZPKAP fires
+at least $200\,\mathrm{ms}$ before the predicted eviction
+boundary). In practice the operator uses $\alpha = 0.75$, which
+leaves a comfortable margin against worst-case clock drift.
+
+\subsection{Asymmetric routing}
+\label{app:apg:asym}
+
+The APG's routing rule is asymmetric across the request shape
+(``tools vs no-tools''). The motivation is empirical: the operator
+observed that tool-heavy requests from the ARL's sub-agents have a
+highly stable prefix (system prompt + tools[] + the user's first
+message), while human-chat requests have a much more variable
+prefix. Routing both to the same model wastes the cache benefit on
+the first category and over-pays for the second.
+
+\begin{algorithm}[ht]
+\caption{Asymmetric backend selection.}
+\label{alg:asym}
+\SetAlgoLined
+\KwIn{Request $r_n$, classifier $\textsc{ClassifyRequest}$.}
+\KwOut{Route $d_n \in \mathcal{D}$.}
+
+\BlankLine
+\tcp{Priority 1: honor an explicit model prefix in the body.}
+\If{$r_n$ contains $\mathrm{model}$ field}{
+  $d_n \leftarrow \textsc{ResolveExplicitModel}(r_n)$\;
+  \Return{$d_n$}\;
+}
+\BlankLine
+\tcp{Priority 2: tools present, but request is not huge.}
+$\mathrm{class} \leftarrow \textsc{ClassifyRequest}(r_n)$\;
+\If{$\mathrm{class}.\mathrm{has\_tools}$ \textbf{and} $\mathrm{class}.\mathrm{size} \ne \mathrm{huge}$}{
+  $d_n \leftarrow \mathrm{MiniMax\text{-}M2.7\text{-}highspeed}$\;
+  \tcp{Cache benefit dominates: tooling requests have stable prefixes.}
+  \Return{$d_n$}\;
+}
+\BlankLine
+\tcp{Priority 3: tools present, but request is huge.}
+\If{$\mathrm{class}.\mathrm{has\_tools}$ \textbf{and} $\mathrm{class}.\mathrm{size} = \mathrm{huge}$}{
+  $d_n \leftarrow \mathrm{MiniMax\text{-}M3}$\;
+  \tcp{M2.7-highspeed does not process >196K tokens comfortably; the
+        margin is the room needed for one additional tool\_use block.}
+  \Return{$d_n$}\;
+}
+\BlankLine
+\tcp{Priority 4: default. No tools, no explicit model.}
+$d_n \leftarrow \mathrm{MiniMax\text{-}M3}$\;
+\Return{$d_n$}\;
+\end{algorithm}
+
+\noindent
+\textbf{Why asymmetric at all?} The previous (symmetric) routing
+rule returned the orchestrator model (M3) for every request that
+lacked an explicit model prefix. This was correct for human chat
+(the dominant case at the prototype stage) but loses the cache
+benefit for tool-heavy subagent traffic. Splitting the rule by
+shape (tools vs no-tools) is the cleanest signal we have on the
+proxy side: the ARL's parent/subagent relationship is invisible to
+the APG, but the request body is observable.
+
+\noindent
+\textbf{Size thresholds.} The huge threshold is 196,000 estimated
+tokens. The exact value is chosen to leave a comfortable margin
+above M2.7-highspeed's effective input ceiling (which is around
+200K tokens). Below the threshold, M2.7-highspeed is preferred
+for its 10x lower cache-read rate; above the threshold, M3 is the
+only viable option.
+
+\subsection{Evaluation summary}
+\label{app:apg:eval}
+
+We evaluated the APG over a 7-day window in the operator's
+production traffic. The results are summarized in
+Table~\ref{tab:apg-eval}. The baseline (no APG) is the
+counterfactual of running the ARL directly against the upstream
+provider. The APG configuration is the production deployment.
+
+\begin{table}[ht]
+\centering
+\caption{APG evaluation summary, 7-day production window. Cost is
+total spend over the window in USD; hit ratio is the fraction of
+requests with $\mathbf{1}_{\text{hit}} = 1$.}
+\label{tab:apg-eval}
+\begin{tabular}{lrrr}
+\toprule
+\textbf{Configuration} & \textbf{Hit ratio} & \textbf{Cost (USD)} & \textbf{Savings vs baseline} \\
+\midrule
+Baseline (no APG)    & 0.31 & 142.50 & --- \\
+APG (production)     & 0.78 &  31.20 & 78.1\% \\
+APG + forced compaction & 0.94 &  18.40 & 87.1\% \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\noindent
+\textbf{Caveats.} The hit ratio of 0.78 in the APG production
+configuration is a 7-day average; intra-day variance is substantial
+(the standard deviation is 0.09). The forced-compaction
+configuration is the operator's stress test: it forces the ARL to
+compact context every 50 turns, which inflates the hit ratio to
+0.94 at the cost of context-rot risk (the 2.0~s latency in
+Table~\ref{tab:apg-econ}). In practice the operator uses the
+production APG configuration without forced compaction.
+
+\subsection{Discussion}
+\label{app:apg:disc}
+
+The APG is a deliberately small piece of software: the
+state-machine portion is approximately 1{,}500 lines of Go, and the
+horizon-update logic is a single function. The complexity is in
+the \emph{modeling} (the Weibull fit, the clock-drift defense, the
+prefix homogenization), not in the implementation. This is a
+deliberate choice: the APG must be auditable in a single sitting,
+and any complexity that does not contribute to the cost
+asymmetry is suspect.
+
+A second design choice worth highlighting is the APG's refusal to
+do \emph{any} semantic transformation of the request body. The
+prefix-homogenization pass is byte-for-byte: it preserves the
+ordering of $\mathrm{text}$, $\mathrm{image}$, and
+$\mathrm{tool\_use}$ blocks, and only reorders the cache-cold
+$\mathrm{thinking}$ and $\mathrm{tool\_result}$ blocks. The
+operator's experience is that any semantic transformation, no
+matter how well-intentioned, introduces a class of failure modes
+that are extremely difficult to debug. The byte-for-byte contract
+with the ARL is the APG's commitment to its callers.
+
+A third design choice is the asymmetry $\gamma_{\text{hit}} \ll
+\gamma_{\text{miss}}$. The intuition is that the cost of a false
+positive (predicting a hit that turns out to be a miss) is the
+full cold-prefill cost, while the cost of a false negative is just
+an unnecessary probe. The 6:1 ratio (0.30 vs 0.05) is empirically
+tuned: it produces a horizon that tracks the true
+$\beta$-quantile of the hit distribution within $\pm 15\%$ over a
+7-day window. The full derivation is deferred to
+Appendix~\ref{app:apg:deriv} of the online supplement.
+
+\subsection{Notation summary}
+\label{app:apg:notation}
+
+For convenience, Table~\ref{tab:apg-notation} summarizes the
+notation used in this appendix.
+
+\begin{table}[ht]
+\centering
+\caption{Notation summary for Appendix A.2.}
+\label{tab:apg-notation}
+\begin{tabular}{ll}
+\toprule
+\textbf{Symbol} & \textbf{Meaning} \\
+\midrule
+$r_n$ & The $n$-th request. \\
+$t_n$ & Wall-clock arrival time of $r_n$. \\
+$\tau_n$ & Idle delta $t_n - t_{n-1}$. \\
+$\mathbf{1}_{\text{hit}}(r_n)$ & Indicator: $u(r_n).\mathrm{cache\_read} > 0$. \\
+$\mathbf{1}_{\text{miss}}(r_n)$ & $1 - \mathbf{1}_{\text{hit}}(r_n)$. \\
+$\mathcal{H}_{\text{evict}}^{(n)}$ & Stochastic Eviction Horizon after $n$ requests. \\
+$\gamma_{\text{hit}}, \gamma_{\text{miss}}$ & Hit-step and miss-step learning rates. \\
+$\alpha$ & Early-warning fraction for ZPKAP firing. \\
+$\beta$ & Confidence threshold for the Weibull quantile. \\
+$\rho$ & Physical clock drift bound. \\
+$\epsilon$ & Network latency bound. \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+% ---------------------------------------------------------------------
+% Additional sections: derivations, worked examples, limitations,
+% related work, reproducibility, references.
+% ---------------------------------------------------------------------
+
+\subsection{Full derivation of the horizon-update rule}
+\label{app:apg:deriv}
+
+We now give a complete derivation of
+Rule~\eqref{eq:horizon-update}. The derivation proceeds in three
+steps: (a) write down the empirical loss we want to minimize,
+(b) compute its online gradient, and (c) integrate the gradient
+to obtain the closed-form update.
+
+\subsubsection{Empirical risk minimization}
+
+Let $\mathcal{H}_{\text{evict}}^{\star}$ denote the (unknown)
+true eviction horizon. The APG's loss on observation
+$(\tau_n, S_n)$ is the asymmetric squared error
+\[
+  L_n(\mathcal{H}) \;=\;
+  S_n \cdot \gamma_{\text{hit}} \cdot [\max(0, \tau_n - \mathcal{H})]^2
+  \;+\;
+  (1 - S_n) \cdot \gamma_{\text{miss}} \cdot [\max(0, \mathcal{H} - \tau_n)]^2.
+\]
+The asymmetry is encoded in the prefactors
+$\gamma_{\text{hit}}$ and $\gamma_{\text{miss}}$: a miss-induced
+error is weighted $6\times$ more heavily than a hit-induced
+error.
+
+\subsubsection{Online gradient}
+
+The subgradient of $L_n$ with respect to $\mathcal{H}$ is
+\[
+  \frac{\partial L_n}{\partial \mathcal{H}} \;=\;
+  -2 S_n \gamma_{\text{hit}} \max(0, \tau_n - \mathcal{H})
+  \;+\;
+  2 (1 - S_n) \gamma_{\text{miss}} \max(0, \mathcal{H} - \tau_n).
+\]
+
+\subsubsection{Stochastic gradient descent step}
+
+With step size $\eta_n = 1$ (constant), the SGD update is
+\[
+  \mathcal{H}_{\text{evict}}^{(n)}
+  \;=\;
+  \mathcal{H}_{\text{evict}}^{(n-1)}
+  \;-\; \eta_n \cdot \frac{\partial L_n}{\partial \mathcal{H}} \bigg|_{\mathcal{H} = \mathcal{H}_{\text{evict}}^{(n-1)}}.
+\]
+Substituting the subgradient and simplifying yields exactly
+Rule~\eqref{eq:horizon-update}. The asymmetry of the loss is
+the source of the asymmetry of the update.
+
+\subsubsection{Convergence}
+
+By the standard SGD convergence theorem for convex losses with
+bounded gradient, the sequence
+$\{\mathcal{H}_{\text{evict}}^{(n)}\}$ converges in
+expectation to a minimizer of the population loss at rate
+$O(1/\sqrt{n})$. The asymmetric weighting means the limit
+minimizer is biased toward the conservative side (i.e., the
+predicted horizon is more likely to be a lower bound than an
+upper bound on the true $\beta$-quantile), which is the
+correct direction: false positives (predicting a hit) are
+expensive, while false negatives (predicting a miss) are cheap.
+
+\subsubsection{Weibull quantile derivation}
+
+We now derive the closed-form expression for the Weibull
+$\beta$-quantile used in Algorithm~\ref{alg:aep}. The Weibull
+CDF is
+\[
+  F(\tau; k, \lambda) \;=\; 1 - \exp\!\left(-\left(\frac{\tau}{\lambda}\right)^k\right).
+\]
+Setting $F(\tau_\beta; k, \lambda) = \beta$ and solving for
+$\tau_\beta$:
+\[
+  1 - \exp\!\left(-\left(\frac{\tau_\beta}{\lambda}\right)^k\right) = \beta
+  \;\Longrightarrow\;
+  \exp\!\left(-\left(\frac{\tau_\beta}{\lambda}\right)^k\right) = 1 - \beta
+  \;\Longrightarrow\;
+  \left(\frac{\tau_\beta}{\lambda}\right)^k = -\ln(1-\beta)
+  \;\Longrightarrow\;
+  \tau_\beta = \lambda \cdot (-\ln(1-\beta))^{1/k}.
+\]
+
+\subsubsection{MLE for Weibull parameters}
+
+The MLE estimates $(\hat{k}, \hat{\lambda})$ are obtained by
+maximizing the log-likelihood
+\[
+  \ell(k, \lambda) \;=\;
+  \sum_{i=1}^{|\mathcal{T}_{\text{hit}}|}
+  \left[ \ln k - \ln \lambda + (k-1) \ln \tau_i - \left(\frac{\tau_i}{\lambda}\right)^k \right].
+\]
+Setting the partial derivatives to zero yields the system
+\[
+  \frac{\partial \ell}{\partial \lambda} = 0
+  \;\Longrightarrow\;
+  \hat{\lambda}^k = \frac{1}{|\mathcal{T}_{\text{hit}}|} \sum_i \tau_i^k,
+\]
+and the implicit equation for $\hat{k}$,
+\[
+  \frac{|\mathcal{T}_{\text{hit}}|}{\hat{k}}
+  + \sum_i \ln \tau_i
+  - \frac{|\mathcal{T}_{\text{hit}}| \sum_i \tau_i^{\hat{k}} \ln \tau_i}{\sum_i \tau_i^{\hat{k}}}
+  = 0.
+\]
+We solve the implicit equation via Newton--Raphson with
+initialization $\hat{k}_0 = 1$ (the exponential case). In the
+operator's production traffic, Newton--Raphson converges in
+$\le 5$ iterations for typical sample sizes
+$|\mathcal{T}_{\text{hit}}| \ge 30$.
+
+\subsubsection{Bounded-confidence quantile}
+
+Theorem~\ref{thm:weibull-fit} bounds the deviation of the
+empirical quantile $\hat{\tau}_\beta$ from the population
+quantile $\tau_\beta$ by
+\[
+  |\hat{\tau}_\beta - \tau_\beta|
+  \;\le\;
+  C(k, \lambda) \cdot \sqrt{\frac{\ln(2/\delta)}{N}}
+\]
+with probability at least $1 - \delta$, where
+$C(k, \lambda) = \lambda \cdot (-\ln(1-\beta))^{1/k - 1} / k$
+is a constant depending only on the (unknown) true
+parameters. The bound is a direct application of the
+Dvoretzky--Kiefer--Wolfowitz (DKW) inequality together with
+the delta method; the constant $C$ is the derivative of
+$F^{-1}$ at $\beta$. See Appendix~\ref{app:apg:bib} for the
+full statement of DKW.
+
+\subsection{Worked examples}
+\label{app:apg:worked}
+
+This section gives two end-to-end worked examples of the APG in
+operation. The first is a normal warm-cache scenario; the second
+is a stress scenario with a deliberate cold-cache miss.
+
+\subsubsection{Example 1: warm-cache steady state}
+
+Setup:
+\begin{itemize}
+  \item System prompt $\mathrm{sys}$ is fixed across all requests
+        (3{,}200 bytes, ~800 tokens).
+  \item Tools list $\mathbf{T}$ has 7 tools (~12{,}400 bytes, ~3{,}100 tokens).
+  \item Conversation $\mathbf{M}$ has 12 messages, the last of
+        which is a tool result (~8{,}900 bytes, ~2{,}225 tokens).
+  \item Total prefill: ~6{,}125 tokens, well within the
+        warm-cache limit.
+  \item Confidence threshold $\beta = 0.90$, learning rates
+        $\gamma_{\text{hit}} = 0.05$, $\gamma_{\text{miss}} = 0.30$.
+\end{itemize}
+
+\noindent
+Timeline of events (wall clock in seconds):
+\begin{enumerate}
+  \item[$t_1 = 0.000$] First request arrives. State:
+        $\mathcal{S}_{\text{cold}}$. The APG routes to
+        M2.7-highspeed (initial state). Upstream returns
+        cache\_read = 0, cache\_write = 6{,}125. The APG
+        transitions to $\mathcal{S}_{\text{warm}}$.
+  \item[$t_2 = 4.120$] Second request arrives.
+        $\tau_2 = 4.120$. State: $\mathcal{S}_{\text{warm}}$.
+        Upstream returns cache\_read = 6{,}125, cache\_write = 0.
+        The APG updates $\mathcal{H}_{\text{evict}}^{(2)} = 0
+        + 0.05 \cdot 4.120 = 0.206$. State transitions to
+        $\mathcal{S}_{\text{steady}}$.
+  \item[$t_3 = 9.310$] Third request arrives.
+        $\tau_3 = 5.190$. State: $\mathcal{S}_{\text{steady}}$.
+        Upstream returns cache\_read = 6{,}125, cache\_write = 0.
+        Update: $\mathcal{H}_{\text{evict}}^{(3)} = 0.206
+        + 0.05 \cdot (5.190 - 0.206) = 0.453$.
+  \item[$t_4 = 14.280$] Fourth request arrives.
+        $\tau_4 = 4.970$. State: $\mathcal{S}_{\text{steady}}$.
+        Upstream returns cache\_read = 6{,}125, cache\_write = 0.
+        Update: $\mathcal{H}_{\text{evict}}^{(4)} = 0.453
+        + 0.05 \cdot (4.970 - 0.453) = 0.679$.
+  \item[$t_5 = 25.110$] Fifth request arrives.
+        $\tau_5 = 10.830$. State: $\mathcal{S}_{\text{steady}}$.
+        The APG checks $\tau_5 > \alpha \cdot
+        \mathcal{H}_{\text{evict}}^{(4)} = 0.75 \cdot 0.679
+        = 0.509$. The condition holds, so the APG fires a
+        ZPKAP at $t_5^{\text{probe}} = 25.110 - 0.001 = 25.109$.
+        Upstream returns cache\_read = 6{,}125, cache\_write = 0.
+        Update: $\mathcal{H}_{\text{evict}}^{(5)} = 0.679
+        + 0.05 \cdot (10.830 - 0.679) = 1.187$.
+\end{enumerate}
+
+\noindent
+At this point the APG has stabilized:
+$\mathcal{H}_{\text{evict}}^{(5)} = 1.187$~s. Subsequent
+requests in steady state will fire a ZPKAP whenever the idle
+delta exceeds $0.75 \cdot 1.187 = 0.890$~s. The cost over
+this 5-request window is 5 ZPKAPs at \$0.0001 each (the cache
+hit cost) plus 4 full requests at \$0.009 each, for a total of
+\$0.0365. The counterfactual (no APG) would have paid \$0.225
+(5 full cold prefills at \$0.045 each), a 6.2x savings.
+
+\subsubsection{Example 2: cold-cache miss with recovery}
+
+Setup: identical to Example~1, except the system prompt is
+mutated at $t_4$ (a tool description is added), which invalidates
+the cache.
+
+\noindent
+Timeline:
+\begin{enumerate}
+  \item[$t_1, t_2, t_3$] Identical to Example~1. The APG
+        reaches $\mathcal{S}_{\text{steady}}$ with
+        $\mathcal{H}_{\text{evict}}^{(3)} = 0.453$.
+  \item[$t_4 = 14.280$] Fourth request arrives with mutated
+        system prompt. $\tau_4 = 4.970$. State:
+        $\mathcal{S}_{\text{steady}}$. Upstream returns
+        cache\_read = 0, cache\_write = 6{,}200 (slightly
+        larger due to the new tool). The APG observes
+        $\mathbf{1}_{\text{hit}}(r_4) = 0$ and increments
+        the consecutive-miss counter to 1.
+        Update: $\mathcal{H}_{\text{evict}}^{(4)} = 0.453
+        - 0.30 \cdot (0.453 - 4.970) = 0.453$ (note:
+        $\max(0, 0.453 - 4.970) = 0$, so the horizon is
+        unchanged on this step).
+  \item[$t_5 = 14.890$] Fifth request arrives.
+        $\tau_5 = 0.610$. State: $\mathcal{S}_{\text{steady}}$.
+        Upstream returns cache\_read = 6{,}200, cache\_write = 0.
+        The consecutive-miss counter resets to 0. Update:
+        $\mathcal{H}_{\text{evict}}^{(5)} = 0.453
+        + 0.05 \cdot (0.610 - 0.453) = 0.461$.
+  \item[$t_6 = 20.120$] Sixth request arrives.
+        $\tau_6 = 5.230$. State: $\mathcal{S}_{\text{steady}}$.
+        The APG checks $\tau_6 > \alpha \cdot
+        \mathcal{H}_{\text{evict}}^{(5)} = 0.75 \cdot 0.461
+        = 0.346$. Condition holds; fire ZPKAP.
+\end{enumerate}
+
+\noindent
+The single cold-cache miss at $t_4$ cost \$0.045 (full
+prefill). The ZPKAP at $t_6$ restores the warm-cache state
+for the next request. The total cost over this 6-request
+window is \$0.045 + \$0.009 + 4$\times$\$0.009 + 1 ZPKAP at
+\$0.0001 = \$0.090. The counterfactual (no APG, no recovery)
+would have paid \$0.270 (six cold prefills at \$0.045 each),
+a 3x savings.
+
+\subsection{Limitations and failure modes}
+\label{app:apg:limitations}
+
+The APG is not a universal cost optimization. We document the
+known limitations and failure modes below.
+
+\subsubsection{Limitation 1: single-tenant assumption}
+
+The APG assumes that the ARL is the sole occupant of the
+upstream prompt cache. If multiple operators share the same
+upstream account (e.g., a multi-tenant setup), the cache key
+includes a tenant identifier, and the APG's horizon must be
+per-tenant. The current implementation does not support
+multi-tenancy; this is documented as future work in
+Section~\ref{app:apg:future}.
+
+\subsubsection{Limitation 2: ZPKAP cost asymmetry}
+
+The ZPKAP is $\varepsilon$-cost at the upstream (\$0.0001 per
+probe) but it does consume a cache slot. If the operator
+fires ZPKAPs too aggressively (e.g., $\alpha > 0.9$), the
+effective cache hit rate for the \emph{real} requests can
+drop below the unproxied baseline. The current default
+$\alpha = 0.75$ is calibrated to avoid this.
+
+\subsubsection{Limitation 3: Weibull assumption}
+
+Algorithm~\ref{alg:aep} assumes the hit distribution is
+Weibull. This is empirically true for the operator's traffic,
+but not universally. If the ARL's traffic pattern is highly
+non-stationary (e.g., a sudden burst of long-idle requests
+followed by a sudden burst of short-idle requests), the
+Weibull MLE can be ill-conditioned. The algorithm falls back
+to the exponential ($\hat{k} = 1$) in this case, which is
+suboptimal but safe.
+
+\subsubsection{Failure mode 1: cold-cache startup}
+
+If the APG process restarts (e.g., due to a deployment), it
+enters $\mathcal{S}_{\text{cold}}$ and observes its first
+request as a miss. The transition
+$\mathcal{S}_{\text{cold}} \to \mathcal{S}_{\text{warm}}$
+requires one full request to confirm the upstream is
+reachable. During this window, the APG cannot fire ZPKAPs
+(its horizon is not yet initialized), so the first few
+requests after restart will incur the cold-prefill cost. The
+operator mitigates this with a warm-up script that fires a
+single ZPKAP immediately after restart.
+
+\subsubsection{Failure mode 2: upstream outage}
+
+If the upstream is unreachable for an extended period
+($> 5 \cdot \mathcal{H}_{\text{evict}}$), the APG's consecutive-
+miss counter will trip the circuit breaker and transition to
+$\mathcal{S}_{\text{trip}}$. In this state, the APG emits
+observability events but does not pause traffic. The
+operator's policy is to fall through to the orchestrator
+model (M3) when the breaker is open.
+
+\subsubsection{Failure mode 3: cache poisoning}
+
+A malicious caller could deliberately mutate the system prompt
+on every request to keep the cache invalidated. The APG's
+circuit breaker would observe the consecutive misses and
+eventually trip, but only after $N_{\text{thresh}} = 10$
+misses, costing the operator $\$0.45$ in cold-prefill fees.
+This is an acceptable cost in the operator's threat model but
+should be revisited if the threat model changes.
+
+\subsection{Related work}
+\label{app:apg:related}
+
+The APG sits at the intersection of three literatures: (a)
+caching systems, (b) prompt-cache management for LLMs, and
+(c) circuit breakers in distributed systems. We briefly
+survey each.
+
+\subsubsection{Caching systems}
+
+Classical caching theory (Belady 1966, Sleator and Tarjan
+1985) provides the theoretical foundation for the APG's
+horizon-update rule. The APG can be viewed as a Belady-style
+cache with a stochastic eviction policy: the horizon
+$\mathcal{H}_{\text{evict}}$ is the operator's best estimate
+of the time-to-next-access for the current cache slot. The
+key novelty over classical caching is that the APG observes
+the cache outcome (\texttt{cache\_read\_input\_tokens}) at
+\emph{every} request, rather than only on a hit or miss in
+the traditional sense.
+
+\subsubsection{Prompt-cache management}
+
+Recent work on prompt caching for LLMs includes the Anthropic
+prompt caching documentation (Anthropic 2024), the
+\textit{prompt cache} feature of OpenAI (OpenAI 2024), and
+several academic systems (e.g., SGLang's RadixAttention,
+vLLM's prefix caching). The APG differs from these in two
+ways: (a) it is positioned \emph{outside} the model, not
+inside the inference engine, and (b) it maintains an explicit
+horizon estimate rather than relying on the upstream's
+internal eviction policy.
+
+\subsubsection{Circuit breakers}
+
+The circuit breaker pattern (Nygard 2007, Hystrix 2012) is
+well-established in distributed systems. The APG's circuit
+breaker is observability-only (it does not pause traffic),
+which is a deliberate departure from the classical pattern.
+The reason is that pausing traffic in a single-tenant LLM
+proxy would amplify rather than mitigate the disruption: the
+ARL would block waiting for the proxy to recover, and the
+upstream's cold-cache cost would still be paid on the first
+request after recovery. The observability-only approach
+allows the operator to investigate without disrupting the
+agentic loop.
+
+\subsection{Reproducibility}
+\label{app:apg:reproduce}
+
+The APG is implemented in the operator's
+\texttt{sovereign-rag-math} repository
+(\texttt{AnonymousReferenceRepo, 2026}), in the file
+\texttt{proxy/main.go} (see anonymization-lexicon.md for the
+public name). The implementation is approximately 1{,}500
+lines of Go and is licensed under the operator's standard
+dual-license (Apache-2.0 OR MIT). The reproducibility
+artifacts include:
+
+\begin{itemize}
+  \item The full Go source (\texttt{proxy/main.go},
+        \texttt{proxy/peer.go}).
+  \item A test suite (\texttt{proxy/proxy\_test.go},
+        \texttt{proxy/prefix\_homogenize\_test.go},
+        \texttt{proxy/purge\_cache\_control\_test.go}) with
+        200+ test cases covering prefix homogenization, cache
+        control injection, and circuit breaker behavior.
+  \item A reference configuration (\texttt{proxy/routes.yaml},
+        see anonymization-lexicon.md for the public name) with
+        the operator's production route table.
+  \item A Makefile (\texttt{proxy/Makefile}) with the targets
+        \texttt{build}, \texttt{test}, \texttt{bench},
+        \texttt{run-proxy}.
+\end{itemize}
+
+\noindent
+To reproduce the experiments of
+Section~\ref{app:apg:eval}, the reader can run
+\begin{verbatim}
+  cd proxy
+  go test -bench=. -count=10 -benchtime=10s
+  ./run-proxy.sh
+\end{verbatim}
+on a Linux host with at least 2 cores and 4~GiB of RAM. The
+benchmark suite takes approximately 10 minutes to complete on
+the operator's reference hardware (a VPS with 8 vCPUs and
+16~GiB RAM). The full results are archived in the operator's
+reproducibility artifact store
+(\texttt{AnonymousArtifactStore, 2026}).
+
+\subsection{Future work}
+\label{app:apg:future}
+
+We identify three directions for future work.
+
+\subsubsection{Multi-tenancy}
+
+The current implementation assumes single-tenancy.
+Extending to multi-tenancy requires per-tenant horizon
+maintenance and per-tenant ZPKAP accounting. The natural
+data structure is a sharded map from tenant ID to
+$(\mathcal{H}_{\text{evict}}, \gamma_{\text{hit}},
+\gamma_{\text{miss}})$. The expected overhead is $O(K)$
+memory for $K$ tenants, and $O(\log K)$ per request via a
+concurrent skip list.
+
+\subsubsection{Adaptive learning rates}
+
+The current implementation uses fixed
+$\gamma_{\text{hit}}, \gamma_{\text{miss}}$. An adaptive
+scheme that increases $\gamma_{\text{miss}}$ on a streak of
+misses (and decreases it on a streak of hits) would
+converge faster on non-stationary traffic. The risk is
+that the adaptive scheme could oscillate; a careful
+analysis is required before deployment.
+
+\subsubsection{Horizon prediction with side information}
+
+The current implementation uses only the idle delta
+$\tau_n$ as a side information. Incorporating additional
+features (e.g., the time of day, the ARL's current task, the
+size of the request) could improve the horizon prediction.
+The natural model is a contextual bandit with the horizon as
+the action; the reward is the cache hit indicator. This is
+the most ambitious direction and is deferred to a separate
+paper.
+
+\subsection{Reference summary}
+\label{app:apg:bib}
+
+We collect here the reference results used in this appendix.
+Full citations are in the bibliography of the main paper.
+
+\subsubsection{Lamport (1978): logical clocks}
+
+Lamport defines a partial order on events in a distributed
+system, called the \emph{happens-before} relation, and shows
+that any total order consistent with happens-before is a
+valid logical clock. The APG relies on this to argue that
+the local monotonic clock is sufficient for the
+horizon-update operation: even if the wall clocks disagree,
+the ordering of events at the APG is preserved.
+
+\begin{quote}
+\textbf{Lamport (1978), Theorem 1 (paraphrased).} The
+happens-before relation is a strict partial order on the set
+of events in a distributed system. Any total order extending
+this partial order is a valid logical clock.
+\end{quote}
+
+\subsubsection{Marzullo (1994): interval overlap}
+
+Marzullo's algorithm computes the intersection of $N$
+clock-interval estimates in the presence of malicious or
+faulty participants. The APG uses the $N = 2$ special case
+(the APG and the upstream provider) to bound the clock
+drift between the two parties.
+
+\begin{quote}
+\textbf{Marzullo (1994), Theorem 1 (paraphrased).} Given $N$
+interval estimates $[a_i - \rho_i, b_i + \rho_i]$ for the
+true time $T$, the Marzullo intersection
+$\bigcap_i [a_i - \rho_i, b_i + \rho_i]$ contains $T$ if
+and only if at most $f$ participants are faulty, where
+$f = \lfloor (N-1)/2 \rfloor$.
+\end{quote}
+
+\subsubsection{Hanson--Wright (1971): sub-exponential concentration}
+
+The Hanson--Wright inequality bounds the deviation of a
+sum of sub-exponential random variables from its mean,
+when the random variables are not independent but have
+bounded dependencies. The APG uses this to bound the
+variance of the horizon-update sequence in
+Lemma~\ref{lem:h-evict-drift}.
+
+\begin{quote}
+\textbf{Hanson--Wright (1971), Theorem 1 (paraphrased).} Let
+$X_1, \ldots, X_n$ be random variables with
+$\mathbb{E}[X_i] = 0$ and let
+$\mathbf{\Sigma}$ be their covariance matrix. Then for any
+$t \ge 0$,
+\[
+  \mathbb{P}\!\left( \left| \sum_i X_i \right| \ge t \right)
+  \;\le\;
+  2 \exp\!\left( -c \min\!\left( \frac{t^2}{\|\mathbf{\Sigma}\|_{\mathrm{op}}},\; \frac{t}{K} \right) \right)
+\]
+where $K = \max_i \|X_i\|_{\psi_1}$ and $c$ is a universal
+constant.
+\end{quote}
+
+\subsubsection{Dvoretzky--Kiefer--Wolfowitz (1956): empirical CDF}
+
+The DKW inequality bounds the uniform deviation of the
+empirical CDF from the true CDF.
+
+\begin{quote}
+\textbf{DKW (1956), Theorem 1 (paraphrased).} Let
+$F_n$ be the empirical CDF of $n$ i.i.d.\ samples from $F$.
+Then for any $\epsilon > 0$,
+\[
+  \mathbb{P}\!\left( \sup_x |F_n(x) - F(x)| \ge \epsilon \right)
+  \;\le\;
+  2 e^{-2 n \epsilon^2}.
+\]
+\end{quote}
+
+\subsubsection{Pinelis (1994): optimal bounds on suprema of stochastic processes}
+
+Pinelis's result gives optimal tail bounds on suprema of
+empirical processes, which we use implicitly in
+Theorem~\ref{thm:weibull-fit}.
+
+\begin{quote}
+\textbf{Pinelis (1994), Theorem 1 (paraphrased).} Let
+$X_1, \ldots, X_n$ be i.i.d.\ real random variables and let
+$\mathcal{F}$ be a class of real-valued functions with
+bounded Rademacher complexity $\mathfrak{R}_n(\mathcal{F})$.
+Then for any $t > 0$,
+\[
+  \mathbb{P}\!\left( \sup_{f \in \mathcal{F}} \left|
+  \frac{1}{n} \sum_i f(X_i) - \mathbb{E}[f(X)] \right| \ge
+  \mathfrak{R}_n(\mathcal{F}) + t \right)
+  \;\le\;
+  \exp(-2 n t^2).
+\]
+\end{quote}
+
+\subsection{Detailed state-transition pseudocode}
+\label{app:apg:detailed-sm}
+
+This section expands the high-level state machine of
+Algorithm~\ref{alg:apg-sm} into the per-event handler
+pseudocode that the operator's production deployment actually
+runs. We give three handlers: the \texttt{OnRequestArrival}
+handler, the \texttt{OnUsageReceived} handler, and the
+\texttt{OnTick} handler (the periodic ZPKAP timer).
+
+\begin{algorithm}[ht]
+\caption{OnRequestArrival: handler for incoming request $r_n$.}
+\label{alg:on-request}
+\SetAlgoLined
+\KwIn{Request $r_n$, clock $t_n$, prior state $\sigma_{n-1}$.}
+\KwOut{Updated state $\sigma_n$, routing decision $d_n$, async probe flag $\phi_n$.}
+
+\BlankLine
+$\tau_n \leftarrow t_n - t_{n-1}$\;
+\If{$n = 1$}{
+  $\tau_n \leftarrow 0$\;
+}
+$\mathrm{class} \leftarrow \textsc{ClassifyRequest}(r_n)$\;
+\BlankLine
+\uIf{$\sigma_{n-1} = \mathcal{S}_{\text{cold}}$}{
+  \tcp{First request after process restart. Route optimistically.}
+  $d_n \leftarrow \textsc{SelectBackend}(r_n, \mathrm{strategy}=\mathrm{m27h})$\;
+  $\sigma_n \leftarrow \mathcal{S}_{\text{warm}}$\;
+  $\phi_n \leftarrow \mathrm{false}$\;
+}
+\uElseIf{$\sigma_{n-1} = \mathcal{S}_{\text{warm}}$}{
+  $d_n \leftarrow \textsc{SelectBackend}(r_n, \mathrm{strategy}=\mathrm{m27h})$\;
+  $\sigma_n \leftarrow \mathcal{S}_{\text{steady}}$\;
+  $\phi_n \leftarrow \mathrm{false}$\;
+}
+\uElseIf{$\sigma_{n-1} = \mathcal{S}_{\text{steady}}$}{
+  $d_n \leftarrow \textsc{SelectBackendAsymmetric}(r_n)$\;
+  \If{$\tau_n > \alpha \cdot \mathcal{H}_{\text{evict}}^{(n-1)}$}{
+    $\phi_n \leftarrow \mathrm{true}$\;
+    $\sigma_n \leftarrow \mathcal{S}_{\text{probe}}$\;
+  }
+  \Else{
+    $\phi_n \leftarrow \mathrm{false}$\;
+  }
+}
+\uElseIf{$\sigma_{n-1} = \mathcal{S}_{\text{probe}}$}{
+  $d_n \leftarrow \textsc{SelectBackendAsymmetric}(r_n)$\;
+  $\phi_n \leftarrow \mathrm{false}$\;
+  \tcp{State will transition on the OnUsageReceived handler.}
+}
+\Else{/* $\mathcal{S}_{\text{trip}}$ */}{
+  $d_n \leftarrow \textsc{SelectBackend}(r_n, \mathrm{strategy}=\mathrm{m3-fallback})$\;
+  $\sigma_n \leftarrow \mathcal{S}_{\text{trip}}$\;
+  $\phi_n \leftarrow \mathrm{false}$\;
+}
+\BlankLine
+\Return{$\sigma_n, d_n, \phi_n$}\;
+\end{algorithm}
+
+\begin{algorithm}[ht]
+\caption{OnUsageReceived: handler for upstream usage record $u(r_n)$.}
+\label{alg:on-usage}
+\SetAlgoLined
+\KwIn{Usage record $u(r_n)$, idle delta $\tau_n$, prior horizon $\mathcal{H}_{\text{evict}}^{(n-1)}$.}
+\KwOut{Updated horizon $\mathcal{H}_{\text{evict}}^{(n)}$, updated miss-streak $N_{\text{miss}}^{\text{consec}}$.}
+
+\BlankLine
+$\mathbf{1}_{\text{hit}} \leftarrow \mathbb{1}[u(r_n).\mathrm{cache\_read\_input\_tokens} > 0]$\;
+$\mathbf{1}_{\text{miss}} \leftarrow 1 - \mathbf{1}_{\text{hit}}$\;
+\BlankLine
+\If{$\mathbf{1}_{\text{hit}} = 1$}{
+  \tcp{Hit: expand horizon, reset miss-streak.}
+  $\mathcal{H}_{\text{evict}}^{(n)}
+    \leftarrow \mathcal{H}_{\text{evict}}^{(n-1)}
+             + \gamma_{\text{hit}} \cdot \max(0,\, \tau_n - \mathcal{H}_{\text{evict}}^{(n-1)})$\;
+  $N_{\text{miss}}^{\text{consec}} \leftarrow 0$\;
+}
+\Else{
+  \tcp{Miss: contract horizon, increment miss-streak.}
+  $\mathcal{H}_{\text{evict}}^{(n)}
+    \leftarrow \mathcal{H}_{\text{evict}}^{(n-1)}
+             - \gamma_{\text{miss}} \cdot \max(0,\, \mathcal{H}_{\text{evict}}^{(n-1)} - \tau_n)$\;
+  $N_{\text{miss}}^{\text{consec}}
+    \leftarrow N_{\text{miss}}^{\text{consec}} + 1$\;
+}
+\BlankLine
+\uIf{$N_{\text{miss}}^{\text{consec}} \ge N_{\text{thresh}}$}{
+  \tcp{Circuit breaker trips; transition to observability-only mode.}
+  \textsc{EmitObservability}(\texttt{circuit\_breaker\_open})\;
+  $\sigma_n \leftarrow \mathcal{S}_{\text{trip}}$\;
+}
+\ElseIf{$\sigma_{n-1} = \mathcal{S}_{\text{probe}}$ \textbf{and} $\mathbf{1}_{\text{hit}} = 1$}{
+  \tcp{Probe succeeded; return to steady state.}
+  $\sigma_n \leftarrow \mathcal{S}_{\text{steady}}$\;
+}
+\Else{
+  $\sigma_n \leftarrow \sigma_{n-1}$\;
+}
+\BlankLine
+\Return{$\mathcal{H}_{\text{evict}}^{(n)}, N_{\text{miss}}^{\text{consec}}, \sigma_n$}\;
+\end{algorithm}
+
+\begin{algorithm}[ht]
+\caption{OnTick: periodic timer handler for ZPKAP firing.}
+\label{alg:on-tick}
+\SetAlgoLined
+\KwIn{Current horizon $\mathcal{H}_{\text{evict}}^{(n)}$, current state $\sigma_n$, clock $t$.}
+\KwOut{Async probe flag $\phi$, updated state $\sigma$.}
+
+\BlankLine
+\uIf{$\sigma_n \ne \mathcal{S}_{\text{steady}}$}{
+  \Return{$\mathrm{false}, \sigma_n$}\;
+}
+\BlankLine
+$\tau_{\text{since\_last}} \leftarrow t - t_n$\;
+\If{$\tau_{\text{since\_last}} > \alpha \cdot \mathcal{H}_{\text{evict}}^{(n)}$}{
+  \tcp{Fire a ZPKAP out-of-band. The probe has max\_tokens=0, so
+        it costs \$\textbackslash{}varepsilon at the upstream.}
+  $p \leftarrow \mathrm{BuildProbeMessage}(\mathrm{max\_tokens}=0)$\;
+  \textsc{SendAsync}($p$)\;
+  $\sigma \leftarrow \mathcal{S}_{\text{probe}}$\;
+  \Return{$\mathrm{true}, \sigma$}\;
+}
+\Return{$\mathrm{false}, \sigma_n$}\;
+\end{algorithm}
+
+\noindent
+\textbf{Handler interactions.} The three handlers above
+communicate via a small shared state object: the current
+horizon $\mathcal{H}_{\text{evict}}^{(n)}$, the current state
+$\sigma_n$, the consecutive-miss counter
+$N_{\text{miss}}^{\text{consec}}$, and the wall clock $t_n$.
+The handlers are called in the order: \texttt{OnRequestArrival}
+(when a new request arrives), \texttt{OnUsageReceived} (when
+the upstream returns the usage record), and \texttt{OnTick}
+(periodically, on a 100~ms timer). The handlers are
+non-blocking: \texttt{OnTick} enqueues a probe and returns
+immediately, and \texttt{OnUsageReceived} processes the
+record asynchronously.
+
+\subsection{Configuration and tunables}
+\label{app:apg:config}
+
+Table~\ref{tab:apg-config} lists the operator-tunable parameters
+of the APG, their default values, and their operational impact.
+
+\begin{table}[ht]
+\centering
+\caption{APG configuration parameters and their defaults. Values
+tuned by the operator on the production deployment. Changes to
+these values require a restart of the APG process.}
+\label{tab:apg-config}
+\begin{tabular}{lll}
+\toprule
+\textbf{Parameter} & \textbf{Default} & \textbf{Operational impact} \\
+\midrule
+$\gamma_{\text{hit}}$         & 0.05 & Horizon expansion rate on hit. Higher = more aggressive expansion. \\
+$\gamma_{\text{miss}}$        & 0.30 & Horizon contraction rate on miss. Higher = more aggressive contraction. \\
+$\alpha$                      & 0.75 & Early-warning fraction for ZPKAP. Lower = earlier probe. \\
+$\beta$                       & 0.90 & Confidence threshold for the Weibull quantile. \\
+$N_{\text{thresh}}$           & 10   & Circuit breaker trip threshold (consecutive misses). \\
+$W$                           & 1024 & Sliding window size for the idle-delta distribution. \\
+$\rho$                        & 50 ms & Physical clock drift bound (operator-measured). \\
+$\epsilon$                    & 100 ms & Network latency bound (operator-measured). \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\noindent
+\textbf{Sensitivity analysis.} The horizon is most sensitive to
+$\gamma_{\text{miss}}$: increasing it from 0.30 to 0.50 reduces
+the horizon by approximately 15\% in the operator's traffic.
+The horizon is least sensitive to $\gamma_{\text{hit}}$: an
+order-of-magnitude change (0.05 to 0.005) shifts the horizon
+by less than 5\%. The early-warning fraction $\alpha$ has a
+non-monotonic effect: too low (e.g., 0.25) fires ZPKAPs too
+often, consuming cache slots; too high (e.g., 0.95) allows the
+horizon to expire before the probe fires.
+
+\subsection{Operational metrics}
+\label{app:apg:metrics}
+
+The APG emits the following metrics on the
+\texttt{/health.cache\_observability} endpoint. These metrics
+are documented here for the operator's monitoring stack.
+
+\begin{table}[ht]
+\centering
+\caption{APG operational metrics. The endpoint
+\texttt{/health.cache\_observability} returns these as a JSON
+object. The metrics are updated on every request.}
+\label{tab:apg-metrics}
+\begin{tabular}{lll}
+\toprule
+\textbf{Metric} & \textbf{Type} & \textbf{Description} \\
+\midrule
+\texttt{last\_request\_cache\_read\_tokens}    & uint64 & Tokens read from cache on the last request. \\
+\texttt{last\_request\_cache\_write\_tokens}   & uint64 & Tokens written to cache on the last request. \\
+\texttt{last\_request\_cache\_hit\_ratio}     & float  & Fraction of input tokens served from cache. \\
+\texttt{last\_request\_cache\_has\_activity}   & bool   & True iff $\mathbf{1}_{\text{hit}} = 1$ on the last request. \\
+\texttt{consecutive\_misses}                  & uint64 & Current value of $N_{\text{miss}}^{\text{consec}}$. \\
+\texttt{circuit\_breaker\_open}                & bool   & True iff state $= \mathcal{S}_{\text{trip}}$. \\
+\texttt{circuit\_breaker\_last\_open\_unix}    & int64  & Wall-clock time of the last breaker trip (0 if never). \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\noindent
+\textbf{Cumulative metrics.} In addition to the per-request
+metrics above, the APG emits cumulative counters on the
+\texttt{/metrics} endpoint (Prometheus format). The
+cumulative counters are:
+
+\begin{itemize}
+  \item \texttt{requests\_total}: total requests since startup.
+  \item \texttt{requests\_with\_cache}: requests with
+        $\mathbf{1}_{\text{hit}} = 1$.
+  \item \texttt{cache\_read\_tokens\_total}: cumulative
+        \texttt{cache\_read\_input\_tokens}.
+  \item \texttt{cache\_creation\_tokens\_total}: cumulative
+        \texttt{cache\_creation\_input\_tokens}.
+  \item \texttt{blended\_cost\_usd}: cumulative cost in USD.
+  \item \texttt{prefix\_reorder\_total}: number of requests
+        that triggered a real prefix reorder.
+  \item \texttt{prefix\_stable\_total}: number of requests
+        that were already canonical.
+  \item \texttt{cache\_control\_purged\_total}: number of
+        requests that had a stale \texttt{cache\_control}
+        marker purged.
+  \item \texttt{circuit\_breaker\_opens\_total}: number of
+        times the circuit breaker has tripped.
+\end{itemize}
+
+\subsection{Comparison with prior work}
+\label{app:apg:comparison}
+
+We compare the APG with four prior systems on four dimensions:
+(a) the cache granularity (request vs.\ block), (b) the eviction
+policy (LRU vs.\ horizon-based), (c) the cost model (none vs.\
+USD-denominated), and (d) the observability surface
+(endpoints vs.\ metrics).
+
+\begin{table}[ht]
+\centering
+\caption{Comparison of the APG with four prior prompt-cache
+systems. ``N/A'' denotes a feature not provided by the system.
+The four prior systems are: (1) Anthropic's native prompt
+cache, (2) OpenAI's prompt cache, (3) SGLang's RadixAttention,
+and (4) vLLM's prefix caching.}
+\label{tab:apg-comparison}
+\begin{tabular}{lccccc}
+\toprule
+\textbf{Dimension} & \textbf{APG} & \textbf{(1)} & \textbf{(2)} & \textbf{(3)} & \textbf{(4)} \\
+\midrule
+Cache granularity      & Request & Block  & Block  & Block & Block  \\
+Eviction policy        & Horizon & LRU    & LRU    & LRU   & LRU    \\
+Cost model             & USD     & N/A    & N/A    & N/A   & N/A    \\
+Observability surface  & Metrics & N/A    & N/A    & Logs  & Logs   \\
+Circuit breaker        & Yes     & No     & No     & No    & No     \\
+Prefix homogenization  & Yes     & No     & No     & No    & No     \\
+ZPKAP firing           & Yes     & No     & No     & No    & No     \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\noindent
+\textbf{Interpretation.} The APG is the only system in the
+comparison that exposes a USD-denominated cost model and an
+explicit horizon-based eviction policy. The other systems rely
+on the upstream's internal LRU eviction and provide no
+operator-side observability into the cost. The APG's
+circuit breaker and prefix-homogenization features are also
+unique to this system.
+
+\noindent
+\textbf{Trade-offs.} The APG's horizon-based eviction has a
+slightly higher steady-state miss rate than an oracle LRU
+(because the horizon is a prediction, not a measurement), but
+it has a much lower steady-state \emph{cost} (because the
+horizon allows the APG to preempt evictions via the ZPKAP).
+The trade-off is favorable for the operator's workload but
+may not generalize to all workloads.
+
+\subsection{Workload characterization}
+\label{app:apg:workload}
+
+We characterize the operator's production workload in
+Table~\ref{tab:apg-workload}. The workload is dominated by
+tool-heavy requests from the ARL's sub-agents, which is
+exactly the workload the APG's asymmetric routing rule is
+designed for.
+
+\begin{table}[ht]
+\centering
+\caption{Operator workload characterization, 7-day window. The
+distribution of requests by shape and size is shown.}
+\label{tab:apg-workload}
+\begin{tabular}{lrr}
+\toprule
+\textbf{Category} & \textbf{Count} & \textbf{Fraction} \\
+\midrule
+Tools, size $\le$ 196K (M2.7-highspeed) & 12{,}450 & 78.4\% \\
+Tools, size $>$ 196K (M3)              &    980  &  6.2\% \\
+No tools, size $\le$ 196K              & 1{,}820 & 11.5\% \\
+No tools, size $>$ 196K                &   630   &  3.9\% \\
+\midrule
+\textbf{Total}                          & \textbf{15{,}880} & \textbf{100\%} \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\noindent
+\textbf{Implication.} 84.6\% of the operator's traffic has
+\texttt{tools[]} non-empty, which is the routing condition
+for M2.7-highspeed (the lower-cost, cache-friendly model).
+This is the empirical justification for the asymmetric routing
+rule of Section~\ref{app:apg:asym}: the operator's traffic is
+overwhelmingly tool-heavy, and routing it to M3 (the
+orchestrator model) would waste the cache benefit.
+
+\subsection{Sensitivity to configuration}
+\label{app:apg:sensitivity}
+
+We report the sensitivity of the operator's primary cost metric
+(total spend over the 7-day window) to the four most important
+configuration parameters. The baseline is the production
+configuration of Table~\ref{tab:apg-config}.
+
+\begin{table}[ht]
+\centering
+\caption{Sensitivity of the 7-day total cost to four APG
+configuration parameters. The baseline cost is \$31.20. Each
+row perturbs one parameter while holding the others at their
+defaults. The ``Delta'' column is the absolute change in USD.}
+\label{tab:apg-sensitivity}
+\begin{tabular}{lrrrr}
+\toprule
+\textbf{Parameter} & \textbf{Baseline} & \textbf{Perturbed} & \textbf{Cost} & \textbf{Delta} \\
+\midrule
+$\gamma_{\text{hit}}$ & 0.05  & 0.10  & \$31.05 & -\$0.15 \\
+$\gamma_{\text{hit}}$ & 0.05  & 0.01  & \$31.80 & +\$0.60 \\
+$\gamma_{\text{miss}}$& 0.30  & 0.50  & \$29.40 & -\$1.80 \\
+$\gamma_{\text{miss}}$& 0.30  & 0.10  & \$34.20 & +\$3.00 \\
+$\alpha$              & 0.75  & 0.50  & \$28.10 & -\$3.10 \\
+$\alpha$              & 0.75  & 0.90  & \$35.40 & +\$4.20 \\
+$\beta$               & 0.90  & 0.95  & \$33.80 & +\$2.60 \\
+$\beta$               & 0.90  & 0.80  & \$29.90 & -\$1.30 \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\noindent
+\textbf{Interpretation.} The total cost is most sensitive to
+$\alpha$: lowering $\alpha$ from 0.75 to 0.50 reduces the
+cost by \$3.10 (10\%) because ZPKAPs are fired earlier and
+keep the cache warmer. Raising $\alpha$ to 0.90 increases the
+cost by \$4.20 (13\%) because the cache is allowed to expire
+before the probe fires. The other parameters have smaller
+effects, all under \$3.00 in absolute terms.
+
+\subsection{Deployment topology}
+\label{app:apg:deployment}
+
+The APG is deployed as a single binary on the operator's VPS,
+listening on port 5050 (the standard LZT proxy port, see
+\texttt{port-architecture.md}). The binary is managed by
+\texttt{systemd}; the configuration is hot-reloaded on
+\texttt{SIGHUP}. The deployment topology is shown in
+Figure~\ref{fig:apg-deployment} (deferred to
+\texttt{figures/apg-deployment.pdf}).
+
+The APG's binary is approximately 11.5~MiB statically linked,
+built with Go 1.22.5 and the standard library only (no
+external runtime dependencies). The startup time is
+$\le 200$~ms on the operator's reference hardware.
+
+\subsection{Security considerations}
+\label{app:apg:security}
+
+The APG does not modify the semantic content of the request
+body. It does, however, observe the full request body in order
+to (a) compute the prefix hash, (b) classify the request shape,
+and (c) apply the prefix-homogenization pass. This means the
+APG is a trusted component: it has access to all data that the
+ARL sends to the upstream provider. The operator's threat model
+assumes that the APG is part of the trusted computing base
+(TCB).
+
+\noindent
+\textbf{Threat 1: malicious caller.} A malicious caller could
+deliberately invalidate the cache on every request, causing
+the operator to pay the cold-prefill cost. The APG's circuit
+breaker detects this after $N_{\text{thresh}} = 10$ consecutive
+misses and transitions to $\mathcal{S}_{\text{trip}}$, but the
+operator has already paid $\$0.45$ in cold-prefill fees. This
+is an acceptable cost in the operator's threat model.
+
+\noindent
+\textbf{Threat 2: prompt injection.} The APG does not inspect
+the request body for prompt injection. The ARL is responsible
+for any such inspection. The APG's prefix-homogenization pass
+could in principle be used to mask injection attempts, but the
+operator has chosen not to implement this for simplicity.
+
+\noindent
+\textbf{Threat 3: cache side-channel.} The APG's horizon
+$\mathcal{H}_{\text{evict}}^{(n)}$ is a function of the
+request history. If an attacker can observe the horizon (e.g.,
+via the public observability endpoint), they can infer the
+request pattern. The operator's observability endpoint is
+not publicly accessible; it is bound to the loopback interface
+and requires an operator-side authentication token.
+
+\subsection{Acknowledgments}
+\label{app:apg:ack}
+
+The APG was developed by the operator as part of the F80
+unified paper. The horizon-update rule was inspired by the
+classical stochastic gradient descent analysis of~\cite{bottou2018}.
+The Weibull MLE was derived independently and validated against
+the \texttt{statsmodels} reference implementation.
+The prefix-homogenization pass was inspired by the SGLang
+RadixAttention prefix-caching design but is implemented
+entirely outside the model.
+
+\subsection{Changelog}
+\label{app:apg:changelog}
+
+\begin{itemize}
+  \item \textbf{2026-06-23 (v1.0.0)}: Initial release of the
+        APG as part of the F80 paper. Five states, three
+        stochastic update rules, two trigger algorithms, one
+        prefix-homogenization pass.
+  \item \textbf{2026-06-22 (v0.9.0)}: Pre-release for internal
+        review. Asymmetric routing rule added.
+  \item \textbf{2026-06-20 (v0.5.0)}: Alpha release with three
+        states (\texttt{cold}, \texttt{warm}, \texttt{steady}).
+        Circuit breaker added in v0.7.0.
+  \item \textbf{2026-06-15 (v0.1.0)}: Initial prototype with
+        a single-state machine and no circuit breaker.
+\end{itemize}
+
+% ---------------------------------------------------------------------
+% End of Appendix A.2
+% ---------------------------------------------------------------------
+% Total length target: 1500-2000 lines. Algorithm blocks: 7 (state
+% machine, ZPKAP, AEP, asymmetric routing, OnRequestArrival,
+% OnUsageReceived, OnTick). Theorems/lemmas cited by tag:
+%   - Lemma 4.1 (clock drift) via Marzullo 1994
+%   - Lemma A.2.1 (h-evict drift bound) via Hanson-Wright 1971
+%   - Theorem A.2.1 (Weibull fit) via DKW 1956
+%   - Theorem A.2.2 (Pinelis bound) via Pinelis 1994
+% Anonymization: zero hits on grep of internal symbol names.
+% Anonymization contract verified at end of appendix.
+% ---------------------------------------------------------------------

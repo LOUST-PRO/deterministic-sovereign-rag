@@ -1,0 +1,20 @@
+cff-version: 1.2.0
+message: |
+  If you use this paper, please cite it as below.
+type: misc
+title: "Deterministic Sovereign RAG via Signed-Hash Projection: An Operator-Stack Formalization of FNV-1a 64-bit + L2 Spherical Projection at D=128 for Reproducible Retrieval on Sovereign Cloud Infrastructure"
+authors:
+  - family-names: Mireles
+    given-names: David
+    orcid: https://orcid.org/0009-0008-4374-2254
+date-released: 2026-06-23
+keywords:
+  - retrieval-augmented generation
+  - feature hashing
+  - johnson-lindenstrauss
+  - signed-hash projection
+  - sovereign cloud
+  - reproducible research
+license: Apache-2.0
+repository-code: https://github.com/LOUST-PRO/deterministic-sovereign-rag
+version: 0.1.0-draft

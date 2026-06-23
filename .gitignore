@@ -1,0 +1,56 @@
+# Defensive .gitignore — public-staging guard
+# Any of these patterns in this repo mean IP-boundary leak risk
+
+# Internal strategy / counter-intel (never public)
+counterintel/
+*counterintel*.md
+*ip-boundary*
+*proprietary*
+*loust-pro-dsvh*
+*f80-internal*
+*drafts/
+.preview/
+.internal/
+*_private.md
+*_internal.md
+
+# Runtime / build artifacts
+runtime/
+build/
+.tex-tmp/
+*.aux
+*.log
+*.out
+*.bbl
+*.blg
+*.toc
+*.synctex.gz
+
+# Editor / OS
+*.swp
+*~
+.DS_Store
+.idea/
+.vscode/
+
+# Secrets (defense in depth)
+*.key
+*.pem
+*.p12
+*.pfx
+*.kdbx
+.env*
+secrets/
+
+# Python (sanitize scripts)
+__pycache__/
+*.pyc
+
+# Node (CI workflows)
+node_modules/
+
+# Go (companion)
+target/
+
+# Worktree artifacts
+.worktrees/

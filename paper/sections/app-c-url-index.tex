@@ -1,0 +1,143 @@
+% ---------------------------------------------------------------------
+% Appendix C: URL Index for Frontier Labs Papers
+% ---------------------------------------------------------------------
+\setcounter{section}{15}
+\section{URL Index for Frontier Labs Papers (Future Deep Research)}
+\label{app:url-index}
+
+This appendix provides a flat index of public URLs for the frontier-
+lab papers and upstream documentation cited in this manuscript. The
+index is provided as a reference for downstream deep-research agents
+that may wish to extend the discussion in \S\ref{sec:related} and
+\S\ref{sec:when-not-det} with additional primary sources. The URLs
+are stable as of 2026-06-23; downstream agents should verify the
+URLs are still live before citing.
+
+\subsection{arXiv Preprints}
+
+The following arXiv preprints are cited in the body of this manuscript
+and are indexed here for downstream deep-research agents. The arXiv
+URLs are stable identifiers and resolve to the canonical abstract
+page; the PDF URL is the canonical download.
+
+\begin{table}[h]
+\centering
+\caption{arXiv preprints cited in this manuscript.}
+\label{tab:arxiv-index}
+\vspace{2pt}
+\begin{tabular}{@{}llll@{}}
+\toprule
+Cite Key & arXiv ID & Title & URL \\
+\midrule
+\texttt{saecache2026} & 2605.18825 & SAECache: Semantic- & \url{https://arxiv.org/abs/2605.18825} \\
+                      &            & Adaptive Eviction    & \\
+\texttt{continuum2025} & 2511.02230 & Continuum: KV Cache & \url{https://arxiv.org/abs/2511.02230} \\
+                       &            & Time-to-Live         & \\
+\texttt{tailoptimized2025} & 2510.15152 & Tail-Optimized & \url{https://arxiv.org/abs/2510.15152} \\
+                           &            & Caching for LLM      & \\
+\texttt{lamport1978} & (Lamport 1978) & Time, Clocks, and the & \url{https://lamport.azurewebsites.net/pubs/time-clocks.pdf} \\
+                     &                & Ordering of Events    & \\
+\texttt{marzullo1994} & (Marzullo 1994) & Tolerating Byzantine & \url{https://dl.acm.org/doi/10.1145/197891.197904} \\
+                      &                 & Faulty Sensors        & \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\subsection{Upstream Documentation}
+
+The following upstream documentation URLs are cited in the body of
+this manuscript and are indexed here for downstream deep-research
+agents. The documentation URLs are version-controlled by the
+respective upstream providers and may change without notice.
+
+\begin{itemize}
+\item Anthropic API documentation --- prompt caching:
+  \url{https://docs.anthropic.com/en/docs/build-with-claude/prompt-caching}
+\item OpenAI API documentation --- prompt caching:
+  \url{https://platform.openai.com/docs/guides/prompt-caching}
+\item Cloudflare AI Gateway --- prompt caching:
+  \url{https://developers.cloudflare.com/ai-gateway/features/caching/}
+\item LiteLLM Issue \#11574 --- semantic cache flag:
+  \url{https://github.com/BerriAI/litellm/issues/11574}
+\item LiteLLM Issue \#15696 --- semantic cache race condition:
+  \url{https://github.com/BerriAI/litellm/issues/15696}
+\item LiteLLM Issue \#3008 --- prompt cache TTL:
+  \url{https://github.com/BerriAI/litellm/issues/3008}
+\end{itemize}
+
+\subsection{Companion Repositories}
+
+The following companion repositories are public, Apache-2.0, and
+host the artifacts required to reproduce the empirical claims of
+\S\ref{sec:benchmarks} and the formal proofs of \S\ref{sec:formalization}.
+
+\begin{table}[h]
+\centering
+\caption{Companion repositories for this manuscript.}
+\label{tab:companion-repos}
+\vspace{2pt}
+\begin{tabular}{@{}lp{0.55\linewidth}@{}}
+\toprule
+Repository & URL \\
+\midrule
+Deterministic Sovereign RAG (this paper) &
+  \url{https://github.com/LOUST-PRO/deterministic-sovereign-rag} \\
+DSVH Verification Suite (dsvh-verification-suite) &
+  \url{https://github.com/LOUST-PRO/dsvh-verification-suite} \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\subsection{Companion Gists}
+
+The following lightweight companion gists are published as
+``tutorial transports'' for the formal material in
+\S\ref{sec:preliminaries} and \S\ref{sec:zero-prefill}. They are
+self-contained, single-file, and licensed Apache-2.0. The English
+gists are the canonical; the Spanish gists (the dual-language adaptation) are
+the LATAM/Spain B2B counterpart.
+
+\begin{itemize}
+\item Mathematics of Sovereign RAG (EN) ---
+  \url{https://gist.github.com/louzt/<gist-id-en-math>}
+\item Mathematics of Sovereign RAG (ES) ---
+  \url{https://gist.github.com/louzt/<gist-id-es-math>}
+  --- the LATAM/Spain B2B counterpart of the English gist
+  (dual-language adaptation).
+\item Zero-Trust Edge Transport (EN) ---
+  \url{https://gist.github.com/louzt/<gist-id-en-zerotrust>}
+\item Zero-Trust Edge Transport (ES) ---
+  \url{https://gist.github.com/louzt/<gist-id-es-zerotrust>}
+\end{itemize}
+
+\subsection{Archival and Author Identifiers}
+
+\begin{table}[h]
+\centering
+\caption{Stable identifiers for this manuscript's artifacts and
+author. The Zenodo DOI is the canonical cite-this identifier; the
+ORCID iD is the canonical author identifier; the email channel is
+the canonical contact for arXiv endorsement requests.}
+\label{tab:archival-identifiers}
+\vspace{2pt}
+\begin{tabular}{@{}ll@{}}
+\toprule
+Identifier & Value \\
+\midrule
+Zenodo DOI (this manuscript) & \texttt{10.5281/zenodo.XXXXXXX} \\
+ORCID iD (author) & \href{https://orcid.org/0009-0008-4374-2254}{0009-0008-4374-2254} \\
+Author website & \url{https://loust.pro} \\
+arXiv endorsement contact & \href{mailto:research@loust.pro}{\texttt{research@loust.pro}} \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\begin{remark}[Why this appendix is short]
+This appendix is intentionally short ($\sim 100$ LOC) and is included
+solely as a reference index for downstream deep-research agents. The
+substantive technical discussion of the cited papers is in the body
+of the manuscript (\S\ref{sec:related} and \S\ref{sec:when-not-det}).
+Downstream agents that wish to extend the discussion should fetch
+the URLs above and verify their stability before citing.
+\end{remark}
+
